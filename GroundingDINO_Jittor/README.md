@@ -124,6 +124,89 @@ GroundingDINO_Jittor/
   - Support for both pycocotools and simple evaluation
   - Metrics: AP, AP50, AP75, APs, APm, APl, AR1, AR10, AR100, ARs, ARm, ARl
 
+### Member C (Text Processing & Training) - ✅ COMPLETED
+
+#### 1. Interface Definitions ✅
+- `models/interfaces.py`: Defines interfaces between different components
+  - Model input/output interfaces for compatibility between modules
+  - Data interfaces for standardized data flow
+  - Text encoder interfaces
+  - Feature fusion interfaces
+  - Query generation interfaces
+  - Training and evaluation interfaces
+
+#### 2. BERT Text Encoder Wrapper ✅
+- `models/text_encoder/bert_wrapper.py`: Complete BERT text encoding implementation
+  - `BertModelWarper`: Wrapper for PyTorch's BERT model to work with Jittor
+  - `TextEncoderShell`: Shell wrapper for text encoding
+  - `BERTWrapper`: Complete BERT wrapper for GroundingDINO with special token handling
+  - Functions for generating attention masks with special tokens
+
+#### 3. Text Processor ✅
+- `models/text_encoder/text_processor.py`: Clause-level text processing
+  - `TextProcessor`: Handles clause-level text processing with phrase extraction
+  - `PhraseProcessor`: Processes text features at the phrase level
+  - Support for sub-sentence presentation and category-to-token masking
+
+#### 4. Feature Fusion Module ✅
+- `models/fusion/feature_fusion.py`: Multiple fusion strategies for visual-language features
+  - `FeatureFusion`: Basic visual-language feature fusion using cross-attention
+  - `ContrastiveEmbed`: Contrastive embedding for classification
+  - `LanguageGuidedFusion`: Language-guided feature fusion
+  - `DynamicFusion`: Dynamic fusion with multiple strategies (concat, add, gate)
+
+#### 5. Language-Guided Query Generation ✅
+- `models/query/language_guided_query.py`: Multiple query generation strategies
+  - `LanguageGuidedQuery`: Basic language-guided query generation
+  - `DynamicQueryGenerator`: Dynamic query generator based on text content
+  - `AdaptiveQueryGenerator`: Adaptive number of queries based on text complexity
+  - `TextConditionalQueryGenerator`: Text-conditional query generation
+  - `PositionalEncoding`: Positional encoding for queries
+
+#### 6. Training Configuration ✅
+- `train/config.py`: Comprehensive training configuration
+  - `TrainingConfig`: Complete configuration class with all training hyperparameters
+  - Argument parser for command-line configuration
+  - Predefined configurations for different models (Swin-T, Swin-B)
+  - Debug configuration for testing
+
+#### 7. Training Utilities ✅
+- `train/utils.py`: Utility functions for training
+  - Reproducibility functions (seed setting)
+  - Model saving/loading functions
+  - Distributed training setup functions
+  - Metric logging utilities
+  - Image visualization functions
+  - Learning rate adjustment functions
+  - Optimizer parameter grouping for different learning rates
+  - Data format conversion between PyTorch and Jittor
+
+#### 8. Training Script ✅
+- `train/trainer.py`: Complete training implementation
+  - `Trainer`: Complete trainer class with training loop
+  - Support for validation and evaluation
+  - Model checkpointing and best model saving
+  - Integration with Weights & Biases for logging
+  - Main function for training
+
+#### 9. VLM Comparison Experiment ✅
+- `experiments/vlm_comparison.py`: Vision-Language Model comparison
+  - `VLMComparator`: Class for comparing Vision-Language Models
+  - Image processing and visualization
+  - Comparison with baseline models
+  - Main function for running experiments
+
+### Member A (Model Architecture) - 🚧 IN PROGRESS
+
+#### Components Pending Implementation:
+- `models/backbone/swin_transformer.py`: Swin Transformer backbone
+- `models/attention/ms_deform_attn.py`: Multi-Scale Deformable Attention
+- `models/transformer/encoder.py`: Transformer Encoder
+- `models/transformer/decoder.py`: Transformer Decoder
+- `models/head/dino_head.py`: DINO detection head
+- `models/groundingdino.py`: Complete model assembly
+- `scripts/convert_weights_pytorch_to_jittor.py`: Weight conversion script
+
 ## Installation
 
 ```bash
@@ -190,5 +273,148 @@ python scripts/coco2odvg.py --coco_path path/to/coco.json --output_path path/to/
 
 # Convert GoldG to ODVG
 python scripts/goldg2odvg.py --goldg_path path/to/goldg.json --output_path path/to/odvg.json --image_dir path/to/images
+```
+
+### Text Encoding
+
+```python
+from jittor_implementation.models.text_encoder import BERTWrapper
+
+# Initialize text encoder
+text_encoder = BERTWrapper(
+    model_name='bert-base-uncased',
+    max_text_len=256
+)
+
+# Process text
+text = ["person . dog . cat"]
+text_dict = text_encoder(text)
+
+# Access encoded features
+encoded_text = text_dict["encoded_text"]  # (B, L, D)
+text_token_mask = text_dict["text_token_mask"]  # (B, L)
+position_ids = text_dict["position_ids"]  # (B, L)
+```
+
+### Feature Fusion
+
+```python
+from jittor_implementation.models.fusion import FeatureFusion
+
+# Initialize fusion module
+fusion = FeatureFusion(
+    hidden_dim=256,
+    num_heads=8,
+    dropout=0.1
+)
+
+# Fuse visual and text features
+fused_features = fusion(
+    visual_features,  # (B, H, W, D) or (B, N, D)
+    text_features,    # (B, L, D)
+    text_token_mask   # (B, L)
+)
+```
+
+### Query Generation
+
+```python
+from jittor_implementation.models.query import LanguageGuidedQuery
+
+# Initialize query generator
+query_generator = LanguageGuidedQuery(
+    hidden_dim=256,
+    num_queries=900
+)
+
+# Generate queries from text
+queries = query_generator(
+    text_features,  # (B, L, D)
+    text_token_mask  # (B, L)
+)
+```
+
+### Training
+
+```python
+from jittor_implementation.train.config import TrainingConfig
+from jittor_implementation.train.trainer import Trainer
+
+# Create configuration
+config = TrainingConfig()
+config.model_name = "groundingdino_swin-t"
+config.batch_size = 4
+config.epochs = 40
+
+# Create trainer
+trainer = Trainer(
+    model=model,
+    text_encoder=text_encoder,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    criterion=criterion,
+    optimizer=optimizer,
+    scheduler=scheduler,
+    config=config
+)
+
+# Start training
+trainer.train()
+```
+
+### Command-line Training
+
+```bash
+# Train model with default configuration
+python -m jittor_implementation.train.trainer \
+  --model_name groundingdino_swin-t \
+  --batch_size 4 \
+  --epochs 40 \
+  --lr 1e-4 \
+  --lr_backbone 1e-5 \
+  --data_path /path/to/dataset \
+  --output_dir ./outputs \
+  --checkpoint_dir ./checkpoints
+
+# Resume training from checkpoint
+python -m jittor_implementation.train.trainer \
+  --model_name groundingdino_swin-t \
+  --resume ./checkpoints/groundingdino_latest.pth \
+  --data_path /path/to/dataset \
+  --output_dir ./outputs \
+  --checkpoint_dir ./checkpoints
+```
+
+### VLM Comparison
+
+```python
+from jittor_implementation.experiments.vlm_comparison import VLMComparator
+
+# Initialize comparator
+comparator = VLMComparator(
+    model=model,
+    text_encoder=text_encoder,
+    config=config,
+    output_dir="./comparison_results"
+)
+
+# Process images with text prompts
+results = comparator.run_comparison(
+    image_list=["image1.jpg", "image2.jpg"],
+    text_prompts=["person", "dog", "cat"],
+    save_visualizations=True
+)
+```
+
+### Command-line VLM Comparison
+
+```bash
+# Compare model outputs on test images
+python -m jittor_implementation.experiments.vlm_comparison \
+  --checkpoint_path ./checkpoints/groundingdino_best.pth \
+  --image_list image1.jpg image2.jpg image3.jpg \
+  --text_prompts "person . dog" "car . bicycle" "cat . bird" \
+  --output_dir ./comparison_results \
+  --save_visualizations
 ```
 
