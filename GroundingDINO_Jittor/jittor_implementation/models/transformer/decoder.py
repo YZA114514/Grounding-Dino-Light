@@ -160,11 +160,14 @@ class DeformableTransformerDecoderLayer(nn.Module):
         super().__init__()
 
         # 可变形交叉注意力（与视觉特征）
-        # 注意：MSDeformAttn需要单独实现
-        # self.cross_attn = MSDeformAttn(...)
-        # 临时使用标准多头注意力
-        self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
-        self.use_deformable = False
+        from ..attention.ms_deform_attn import MSDeformAttn
+        self.cross_attn = MSDeformAttn(
+            embed_dim=d_model,
+            num_levels=n_levels,
+            num_heads=n_heads,
+            num_points=n_points,
+            batch_first=True,
+        )
         
         self.dropout1 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.norm1 = nn.LayerNorm(d_model)
@@ -272,21 +275,15 @@ class DeformableTransformerDecoderLayer(nn.Module):
             tgt = self.catext_norm(tgt)
 
         # 3. 可变形交叉注意力（与视觉特征）
-        if self.use_deformable:
-            # 使用可变形注意力
-            tgt2 = self.cross_attn(
-                query=self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
-                reference_points=tgt_reference_points.transpose(0, 1),
-                value=memory.transpose(0, 1),
-                spatial_shapes=memory_spatial_shapes,
-                level_start_index=memory_level_start_index,
-                key_padding_mask=memory_key_padding_mask,
-            ).transpose(0, 1)
-        else:
-            # 使用标准多头注意力（临时方案）
-            q = self.with_pos_embed(tgt, tgt_query_pos)
-            k = self.with_pos_embed(memory, memory_pos)
-            tgt2, _ = self.cross_attn(q, k, memory, key_padding_mask=memory_key_padding_mask)
+        # 使用多尺度可变形注意力
+        tgt2 = self.cross_attn(
+            query=self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
+            reference_points=tgt_reference_points.transpose(0, 1),
+            value=memory.transpose(0, 1),
+            spatial_shapes=memory_spatial_shapes,
+            level_start_index=memory_level_start_index,
+            key_padding_mask=memory_key_padding_mask,
+        ).transpose(0, 1)
         
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)

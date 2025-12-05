@@ -130,18 +130,14 @@ class DeformableTransformerEncoderLayer(nn.Module):
         super().__init__()
 
         # 多尺度可变形自注意力
-        # 注意：MSDeformAttn需要单独实现，这里先用占位符
-        # self.self_attn = MSDeformAttn(
-        #     embed_dim=d_model,
-        #     num_levels=n_levels,
-        #     num_heads=n_heads,
-        #     num_points=n_points,
-        #     batch_first=True,
-        # )
-        
-        # 临时使用标准多头注意力作为占位
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
-        self.use_deformable = False  # 标记是否使用可变形注意力
+        from ..attention.ms_deform_attn import MSDeformAttn
+        self.self_attn = MSDeformAttn(
+            embed_dim=d_model,
+            num_levels=n_levels,
+            num_heads=n_heads,
+            num_points=n_points,
+            batch_first=True,
+        )
         
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
@@ -154,7 +150,7 @@ class DeformableTransformerEncoderLayer(nn.Module):
         self.dropout3 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # 保存参数用于后续替换为真正的MSDeformAttn
+        # 保存参数
         self.d_model = d_model
         self.n_levels = n_levels
         self.n_heads = n_heads
@@ -195,24 +191,15 @@ class DeformableTransformerEncoderLayer(nn.Module):
         Returns:
             src: 编码后的特征 [bs, sum(hi*wi), d_model]
         """
-        if self.use_deformable:
-            # 使用可变形注意力
-            src2 = self.self_attn(
-                query=self.with_pos_embed(src, pos),
-                reference_points=reference_points,
-                value=src,
-                spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index,
-                key_padding_mask=key_padding_mask,
-            )
-        else:
-            # 使用标准多头注意力（临时方案）
-            # 需要转置为 [seq_len, batch, d_model] 格式
-            src_t = src.transpose(0, 1)
-            pos_t = pos.transpose(0, 1) if pos is not None else None
-            q = k = self.with_pos_embed(src_t, pos_t)
-            src2, _ = self.self_attn(q, k, src_t)
-            src2 = src2.transpose(0, 1)
+        # 使用多尺度可变形注意力
+        src2 = self.self_attn(
+            query=self.with_pos_embed(src, pos),
+            reference_points=reference_points,
+            value=src,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            key_padding_mask=key_padding_mask,
+        )
         
         src = src + self.dropout1(src2)
         src = self.norm1(src)
