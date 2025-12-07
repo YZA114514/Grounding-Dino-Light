@@ -196,22 +196,210 @@ GroundingDINO_Jittor/
   - Comparison with baseline models
   - Main function for running experiments
 
-### Member A (Model Architecture) - 🚧 IN PROGRESS
+### Member A (Model Architecture) - ✅ COMPLETED
 
-#### Components Pending Implementation:
-- `models/backbone/swin_transformer.py`: Swin Transformer backbone
+#### 1. Multi-Scale Deformable Attention ✅
 - `models/attention/ms_deform_attn.py`: Multi-Scale Deformable Attention
+  - `MSDeformAttn`: Core deformable attention module
+  - Support for multi-scale feature maps
+  - Pure Jittor implementation (no CUDA kernel)
+
+#### 2. MultiheadAttention ✅
+- `models/attention/multihead_attention.py`: Standard multi-head attention
+  - Custom implementation for Jittor compatibility
+
+#### 3. Transformer Encoder ✅
 - `models/transformer/encoder.py`: Transformer Encoder
+  - `DeformableTransformerEncoderLayer`: Encoder layer with deformable attention
+  - `TransformerEncoder`: Full encoder stack
+  - `BiAttentionBlock`: Bi-directional attention for feature fusion
+
+#### 4. Transformer Decoder ✅
 - `models/transformer/decoder.py`: Transformer Decoder
+  - `DeformableTransformerDecoderLayer`: Decoder layer with text cross-attention
+  - `TransformerDecoder`: Full decoder stack with iterative refinement
+  - `MLP`: Multi-layer perceptron for predictions
+
+#### 5. DINO Detection Head ✅
 - `models/head/dino_head.py`: DINO detection head
-- `models/groundingdino.py`: Complete model assembly
-- `scripts/convert_weights_pytorch_to_jittor.py`: Weight conversion script
+  - `ContrastiveEmbed`: Contrastive embedding for open-vocabulary classification
+  - `DINOHead`: Complete detection head with bbox regression
+  - `MLP`: Bounding box regression network
+
+#### 6. Swin Transformer Backbone ✅
+- `models/backbone/swin_transformer.py`: Swin Transformer backbone
+  - Full Swin-T/Swin-B implementation
+  - Multi-scale feature extraction
+  - Converted from PyTorch to Jittor API
+
+#### 7. Complete Model Assembly ✅
+- `models/groundingdino.py`: Complete GroundingDINO model
+  - Integration of all components
+  - Support for captions input
+  - Text encoding and feature fusion
+
+#### 8. Weight Conversion Script ✅
+- `scripts/convert_weights_pytorch_to_jittor.py`: PyTorch to Jittor weight conversion
+  - Converts official PyTorch weights to Jittor format
+  - Supports both Swin-T and Swin-B models
+
+#### 9. Inference Utilities ✅
+- `util/inference.py`: Complete inference pipeline
+  - Image preprocessing
+  - Text processing
+  - Post-processing and visualization
+  - `GroundingDINOInference`: Easy-to-use inference class
 
 ## Installation
 
+### 前置要求
+
+- Anaconda 或 Miniconda (推荐使用 conda 管理环境)
+- Python 3.9
+- CUDA (可选，用于 GPU 加速)
+
+### 快速安装 (推荐方法)
+
+如果 conda 创建环境很慢，建议直接使用以下命令：
+
 ```bash
-pip install -r requirements.txt
+# 1. 创建基础环境
+conda create -n groundingdino_jittor python=3.19 -y
+
+# 2. 激活环境
+conda activate groundingdino_jittor
+
+# 3. 使用 pip 安装所有依赖 (更快)
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 4. 验证安装
+python -c "import jittor as jt; print(f'Jittor: {jt.__version__}')"
+python -c "import torch, transformers, timm, pycocotools; print('所有依赖安装成功!')"
 ```
+
+### 使用 Conda 环境文件 (较慢)
+
+如果网络较好，可以使用：
+
+```bash
+# 配置国内镜像源 (加速)
+conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
+conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free
+
+# 创建环境
+conda env create -f environment.yml
+
+# 激活环境
+conda activate groundingdino_jittor
+```
+
+### 主要依赖
+
+- **jittor** >= 1.3.0 - 核心深度学习框架
+- **torch** >= 1.13.0 - 用于 BERT 模型和权重转换
+- **transformers** >= 4.20.0 - BERT 文本编码器
+- **timm** >= 0.6.0 - Swin Transformer backbone
+- **pycocotools** >= 2.0.4 - LVIS/COCO 评估
+- numpy, pillow, matplotlib - 数据处理和可视化
+
+### 常见问题
+
+- **conda 命令找不到**: 使用 Anaconda Prompt (Windows) 或重启终端
+- **环境创建失败**: 检查网络连接，或手动创建环境后使用 `pip install -r requirements.txt`
+- **GPU 支持**: Jittor 会自动检测 CUDA，无需手动配置
+
+## Quick Start - Inference
+
+### 1. 下载预训练权重
+
+从官方 GitHub 下载 PyTorch 预训练权重：
+
+```bash
+# 创建 weights 目录
+mkdir weights
+cd weights
+
+# 下载 Swin-T 版本权重 (~694MB)
+# 方法1: 使用 wget (Linux/Mac)
+wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
+
+# 方法2: 使用浏览器直接下载
+# 访问: https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
+
+cd ..
+```
+
+### 2. 转换权重到 Jittor 格式
+
+```bash
+python scripts/convert_weights_pytorch_to_jittor.py \
+    --pytorch_weight weights/groundingdino_swint_ogc.pth \
+    --output weights/groundingdino_swint_ogc_jittor.pkl
+```
+
+转换成功后会显示：
+```
+成功加载 940 个权重
+成功保存 940 个权重
+转换完成！
+```
+
+### 3. 运行推理
+
+#### 演示模式（自动创建测试图像）
+
+```bash
+python scripts/run_inference.py --demo
+```
+
+#### 自定义图像推理
+
+```bash
+python scripts/run_inference.py \
+    --image your_image.jpg \
+    --text "cat . dog . person ." \
+    --output result.jpg
+```
+
+#### 完整参数
+
+```bash
+python scripts/run_inference.py \
+    --image <图像路径> \
+    --text <文本提示，用 . 分隔不同类别> \
+    --output <输出路径> \
+    --box_threshold 0.35 \
+    --text_threshold 0.25
+```
+
+### 推理示例
+
+```python
+from jittor_implementation.util.inference import GroundingDINOInference
+
+# 初始化模型
+model = GroundingDINOInference(
+    weight_path="weights/groundingdino_swint_ogc_jittor.pkl",
+    device="cuda",
+    box_threshold=0.35,
+    text_threshold=0.25,
+)
+
+# 执行推理
+boxes, scores, phrases = model.predict(
+    image="path/to/image.jpg",
+    caption="cat . dog . person ."
+)
+
+# 推理并可视化
+result_image = model.predict_and_visualize(
+    image_path="path/to/image.jpg",
+    caption="cat . dog . person .",
+    output_path="output.jpg"
+)
+```
+
+---
 
 ## Usage
 

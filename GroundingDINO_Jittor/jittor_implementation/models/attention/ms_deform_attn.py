@@ -86,6 +86,9 @@ def multi_scale_deformable_attn_jittor(
         # value_l_: [bs*num_heads, embed_dims, H_, W_]
         # sampling_grid_l_: [bs*num_heads, num_queries, num_points, 2]
         # output: [bs*num_heads, embed_dims, num_queries, num_points]
+        # 确保数据类型一致 (Jittor grid_sample 要求)
+        sampling_grid_l_ = sampling_grid_l_.float()
+        value_l_ = value_l_.float()
         sampling_value_l_ = nn.grid_sample(
             value_l_, 
             sampling_grid_l_,
@@ -267,9 +270,14 @@ class MSDeformAttn(nn.Module):
         
         # 验证空间形状
         assert spatial_shapes is not None, "spatial_shapes is required"
-        total_value = int((spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum())
+        # 计算总值数量（避免使用 .item()，改用 numpy）
+        spatial_product = spatial_shapes[:, 0] * spatial_shapes[:, 1]
+        if hasattr(spatial_product, 'numpy'):
+            total_value = int(spatial_product.numpy().sum())
+        else:
+            total_value = int(spatial_product.sum())
         assert total_value == num_value, \
-            f"spatial shapes {spatial_shapes} doesn't match num_value {num_value}"
+            f"spatial shapes sum {total_value} doesn't match num_value {num_value}"
         
         # Value 投影
         value = self.value_proj(value)

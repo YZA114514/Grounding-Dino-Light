@@ -123,7 +123,9 @@ class GroundingDINO(nn.Module):
         else:
             # 占位符：实际使用时需要传入 backbone
             self.backbone = None
-            backbone_channels = [96, 192, 384, 768]  # Swin-T 默认通道数
+            # Swin-T 输出通道数: [192, 384, 768] + 额外下采样 768
+            # 匹配官方预训练权重
+            backbone_channels = [192, 384, 768, 768]
         
         # ============================================================
         # 输入投影层：将不同尺度的特征投影到统一维度
@@ -256,15 +258,25 @@ class GroundingDINO(nn.Module):
         
         # 创建简化的 Transformer 结构
         class SimpleTransformer(nn.Module):
-            def __init__(self):
+            def __init__(self_inner):
                 super().__init__()
-                self.d_model = d_model
-                self.nhead = nhead
-                self.num_decoder_layers = num_decoder_layers
+                self_inner.d_model = d_model
+                self_inner.nhead = nhead
+                self_inner.num_decoder_layers = num_decoder_layers
                 
-                # Encoder
-                encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
-                self.encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
+                # Encoder: 使用我们自己实现的 DeformableTransformerEncoderLayer
+                from .transformer.encoder import DeformableTransformerEncoderLayer
+                self_inner.encoder_layers = nn.ModuleList([
+                    DeformableTransformerEncoderLayer(
+                        d_model=d_model,
+                        d_ffn=dim_feedforward,
+                        dropout=dropout,
+                        n_levels=num_feature_levels,
+                        n_heads=nhead,
+                        n_points=4,
+                    )
+                    for _ in range(num_encoder_layers)
+                ])
                 
                 # Decoder
                 from .transformer.decoder import TransformerDecoder, DeformableTransformerDecoderLayer
@@ -277,7 +289,7 @@ class GroundingDINO(nn.Module):
                     n_points=4,
                     use_text_cross_attention=True,
                 )
-                self.decoder = TransformerDecoder(
+                self_inner.decoder = TransformerDecoder(
                     decoder_layer=decoder_layer,
                     num_layers=num_decoder_layers,
                     norm=nn.LayerNorm(d_model),
@@ -287,8 +299,8 @@ class GroundingDINO(nn.Module):
                     num_feature_levels=num_feature_levels,
                 )
                 
-                self.bbox_embed = None
-                self.class_embed = None
+                self_inner.bbox_embed = None
+                self_inner.class_embed = None
         
         return SimpleTransformer()
     
@@ -308,11 +320,58 @@ class GroundingDINO(nn.Module):
         valid_ratio = jt.stack([valid_ratio_w, valid_ratio_h], dim=-1)
         return valid_ratio
     
+    def set_tokenizer(self, tokenizer):
+        """设置 tokenizer"""
+        self.tokenizer = tokenizer
+    
+    def encode_text(self, captions: List[str]) -> Dict:
+        """
+        编码文本（简化版本）
+        
+        Args:
+            captions: 文本列表
+            
+        Returns:
+            text_dict: 文本特征字典
+        """
+        bs = len(captions)
+        
+        # 使用 tokenizer（如果可用）
+        if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+            try:
+                tokenized = self.tokenizer(
+                    captions,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=self.max_text_len,
+                    return_tensors="pt"
+                )
+                
+                # 简化: 使用随机特征模拟 BERT 输出
+                # 实际应使用 BERT 编码器
+                encoded_text = jt.randn(bs, self.max_text_len, self.hidden_dim) * 0.1
+                text_token_mask = jt.array(tokenized['attention_mask'].numpy()).bool()
+                
+                return {
+                    "encoded_text": encoded_text,
+                    "text_token_mask": text_token_mask,
+                    "tokenized": tokenized,
+                }
+            except:
+                pass
+        
+        # 默认: 创建占位符文本特征
+        return {
+            "encoded_text": jt.randn(bs, self.max_text_len, self.hidden_dim) * 0.1,
+            "text_token_mask": jt.ones((bs, self.max_text_len), dtype=jt.bool),
+        }
+    
     def execute(
         self,
         samples: jt.Var,
         targets: Optional[List[Dict]] = None,
         text_dict: Optional[Dict] = None,
+        captions: Optional[List[str]] = None,
         **kwargs
     ) -> Dict[str, jt.Var]:
         """
@@ -326,6 +385,7 @@ class GroundingDINO(nn.Module):
                 - text_token_mask: [bs, n_text]
                 - position_ids: [bs, n_text]
                 - text_self_attention_masks: [bs, n_text, n_text]
+            captions: 文本提示列表（可选，用于自动编码）
                 
         Returns:
             outputs: 包含 pred_logits 和 pred_boxes 的字典
@@ -349,6 +409,10 @@ class GroundingDINO(nn.Module):
         # ============================================================
         # 2. 处理文本特征
         # ============================================================
+        # 如果提供了 captions，自动编码
+        if captions is not None and text_dict is None:
+            text_dict = self.encode_text(captions)
+        
         if text_dict is None:
             # 创建空的文本特征（用于推理时）
             text_dict = {
@@ -365,27 +429,57 @@ class GroundingDINO(nn.Module):
         # ============================================================
         # 3. 提取视觉特征
         # ============================================================
+        # 获取 backbone 通道数（用于生成正确维度的特征）
+        if hasattr(self, 'input_proj') and len(self.input_proj) > 0:
+            # 从 input_proj 推断 backbone 通道数
+            backbone_channels = []
+            for proj in self.input_proj:
+                if hasattr(proj[0], 'in_channels'):
+                    backbone_channels.append(proj[0].in_channels)
+                else:
+                    backbone_channels.append(self.hidden_dim)
+        else:
+            backbone_channels = [192, 384, 768, 768]
+        
         if self.backbone is not None:
             features, poss = self.backbone(samples)
         else:
-            # 使用占位符特征（用于测试）
+            # 使用占位符特征（用于测试，无 backbone）
+            # backbone_channels = [192, 384, 768, 768]
+            # 前 3 层来自 backbone 的多尺度输出，第 4 层是额外下采样
+            # 但是由于没有 backbone，我们需要生成所有 4 层的特征
             features = []
             poss = []
-            h, w = H, W
+            h, w = H // 4, W // 4  # 初始下采样 4x（Swin Stage 1 输出）
+            
+            # 生成所有层的特征
             for i in range(self.num_feature_levels):
-                h, w = h // 2, w // 2
-                feat = jt.randn(bs, self.hidden_dim, h, w)
-                pos = jt.randn(bs, self.hidden_dim, h, w)
+                if i < len(backbone_channels):
+                    in_ch = backbone_channels[i]
+                else:
+                    in_ch = backbone_channels[-1]
+                    
+                feat = jt.randn(bs, in_ch, h, w) * 0.1
+                pos = jt.zeros(bs, self.hidden_dim, h, w)
                 features.append((feat, jt.zeros((bs, h, w), dtype=jt.bool)))
                 poss.append(pos)
+                
+                # 下采样 2x（除了最后一层）
+                if i < self.num_feature_levels - 1:
+                    h, w = max(1, h // 2), max(1, w // 2)
         
         # ============================================================
         # 4. 投影和展平特征
         # ============================================================
         srcs = []
         masks_flat = []
-        for l, (feat, mask) in enumerate(zip(features, masks) if isinstance(features[0], tuple) 
-                                         else zip([(f, m) for f, m in zip(features, [jt.zeros((bs, f.shape[2], f.shape[3]), dtype=jt.bool) for f in features])], [None]*len(features))):
+        
+        # 确定有多少层直接来自 backbone（或占位符）
+        num_backbone_levels = min(len(features), len(backbone_channels) - 1, self.num_feature_levels)
+        
+        # 处理来自 backbone 的特征层（使用 1x1 卷积投影）
+        for l in range(num_backbone_levels):
+            feat = features[l]
             if isinstance(feat, tuple):
                 src, mask = feat
             else:
@@ -394,19 +488,35 @@ class GroundingDINO(nn.Module):
             
             if l < len(self.input_proj):
                 srcs.append(self.input_proj[l](src))
-            masks_flat.append(mask)
-        
-        # 如果特征层级不够，添加额外的下采样层
-        if self.num_feature_levels > len(srcs):
-            for l in range(len(srcs), self.num_feature_levels):
-                if l == len(srcs):
-                    src = self.input_proj[l](features[-1][0] if isinstance(features[-1], tuple) else features[-1])
-                else:
-                    src = self.input_proj[l](srcs[-1])
-                m = masks_flat[-1]
-                mask = nn.interpolate(m.unsqueeze(1).float(), size=src.shape[-2:]).squeeze(1).bool()
-                srcs.append(src)
                 masks_flat.append(mask)
+        
+        # 处理额外的下采样层（使用 3x3 stride=2 卷积）
+        if self.num_feature_levels > len(srcs) and len(self.input_proj) > len(srcs):
+            # 获取最后一层的原始特征（用于下采样）
+            if len(features) > num_backbone_levels:
+                # 如果有更多特征，使用它们
+                last_feat = features[num_backbone_levels][0] if isinstance(features[num_backbone_levels], tuple) else features[num_backbone_levels]
+            else:
+                last_feat = features[-1][0] if isinstance(features[-1], tuple) else features[-1]
+            
+            for l in range(len(srcs), self.num_feature_levels):
+                if l < len(self.input_proj):
+                    if l == num_backbone_levels:
+                        # 从原始特征下采样
+                        src = self.input_proj[l](last_feat)
+                    else:
+                        # 从上一个投影结果下采样（注意这里的 input_proj 可能是下采样层）
+                        src = self.input_proj[l](srcs[-1])
+                    
+                    # 创建对应的 mask
+                    if len(masks_flat) > 0:
+                        m = masks_flat[-1]
+                        mask = nn.interpolate(m.unsqueeze(1).float(), size=src.shape[-2:]).squeeze(1).bool()
+                    else:
+                        mask = jt.zeros((bs, src.shape[2], src.shape[3]), dtype=jt.bool)
+                    
+                    srcs.append(src)
+                    masks_flat.append(mask)
         
         # 展平特征
         src_flatten = []

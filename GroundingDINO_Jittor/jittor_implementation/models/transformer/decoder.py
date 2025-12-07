@@ -24,6 +24,11 @@ from typing import Optional
 import jittor as jt
 from jittor import nn
 
+# 导入 MultiheadAttention 以注入到 nn 模块
+from ..attention import MultiheadAttention
+if not hasattr(nn, 'MultiheadAttention'):
+    nn.MultiheadAttention = MultiheadAttention
+
 
 def _get_clones(module, N, layer_share=False):
     """克隆模块N次"""
@@ -110,9 +115,9 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(
+        self.layers = nn.ModuleList([
             nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
-        )
+        ])
 
     def execute(self, x):
         for i, layer in enumerate(self.layers):

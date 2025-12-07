@@ -10,7 +10,6 @@ from .interfaces import (
     QueryOutput,
     TrainingState,
     TrainingConfig,
-    TrainingConfigClass,
     EvalResult
 )
 

@@ -46,9 +46,9 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(
-            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
-        )
+        # Jittor 的 ModuleList 需要传入列表而非生成器
+        layers = [nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])]
+        self.layers = nn.ModuleList(layers)
 
     def execute(self, x):
         """
@@ -119,7 +119,8 @@ class ContrastiveEmbed(nn.Module):
         
         # 对padding位置填充-inf
         # text_token_mask: [bs, n_text] -> [bs, 1, n_text]
-        mask = ~text_token_mask.unsqueeze(1)  # True表示padding
+        # Jittor 不支持 ~ 操作符，使用 logical_not 或 1 - x
+        mask = (1 - text_token_mask.unsqueeze(1).float()).bool()  # True表示padding
         res = jt.where(mask, jt.full_like(res, float("-inf")), res)
 
         # 填充到固定长度
@@ -176,16 +177,17 @@ class DINOHead(nn.Module):
         # 为每个decoder层创建预测头
         if dec_pred_bbox_embed_share:
             # 共享边界框回归头
-            self.bbox_embed = nn.ModuleList([_bbox_embed for _ in range(num_decoder_layers)])
+            bbox_embeds = [_bbox_embed for _ in range(num_decoder_layers)]
+            self.bbox_embed = nn.ModuleList(bbox_embeds)
         else:
             # 每层独立的边界框回归头
             import copy
-            self.bbox_embed = nn.ModuleList([
-                copy.deepcopy(_bbox_embed) for _ in range(num_decoder_layers)
-            ])
+            bbox_embeds = [copy.deepcopy(_bbox_embed) for _ in range(num_decoder_layers)]
+            self.bbox_embed = nn.ModuleList(bbox_embeds)
         
         # 分类头（对比嵌入）对所有层共享
-        self.class_embed = nn.ModuleList([_class_embed for _ in range(num_decoder_layers)])
+        class_embeds = [_class_embed for _ in range(num_decoder_layers)]
+        self.class_embed = nn.ModuleList(class_embeds)
 
     def execute(
         self,

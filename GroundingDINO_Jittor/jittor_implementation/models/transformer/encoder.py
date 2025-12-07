@@ -23,6 +23,11 @@ from typing import Optional, List
 import jittor as jt
 from jittor import nn
 
+# 导入 MultiheadAttention 以注入到 nn 模块
+from ..attention import MultiheadAttention
+if not hasattr(nn, 'MultiheadAttention'):
+    nn.MultiheadAttention = MultiheadAttention
+
 # 需要导入的模块（假设已实现）
 # from ..attention.ms_deform_attn import MultiScaleDeformableAttention as MSDeformAttn
 

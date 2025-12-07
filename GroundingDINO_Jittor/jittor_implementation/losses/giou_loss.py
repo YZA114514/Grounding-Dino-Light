@@ -186,10 +186,10 @@ class DIoULoss(nn.Module):
         target_cy = (target_boxes_xyxy[:, 1] + target_boxes_xyxy[:, 3]) / 2
         
         # Calculate diagonal of the smallest enclosing box
-        c_x = jt.maximum(pred_boxes_xyxy[:, 0], target_boxes_xyxy[:, 0]) - 
-               jt.minimum(pred_boxes_xyxy[:, 2], target_boxes_xyxy[:, 2])
-        c_y = jt.maximum(pred_boxes_xyxy[:, 1], target_boxes_xyxy[:, 1]) - 
-               jt.minimum(pred_boxes_xyxy[:, 3], target_boxes_xyxy[:, 3])
+        c_x = (jt.maximum(pred_boxes_xyxy[:, 0], target_boxes_xyxy[:, 0]) - 
+               jt.minimum(pred_boxes_xyxy[:, 2], target_boxes_xyxy[:, 2]))
+        c_y = (jt.maximum(pred_boxes_xyxy[:, 1], target_boxes_xyxy[:, 1]) - 
+               jt.minimum(pred_boxes_xyxy[:, 3], target_boxes_xyxy[:, 3]))
         c_squared = c_x ** 2 + c_y ** 2 + 1e-7
         
         # Calculate squared distance between center points
@@ -261,14 +261,14 @@ class CIoULoss(nn.Module):
         target_cy = (target_boxes_xyxy[:, 1] + target_boxes_xyxy[:, 3]) / 2
         
         # Calculate diagonal of the smallest enclosing box
-        c_x = jt.maximum(pred_boxes_xyxy[:, 0], target_boxes_xyxy[:, 0]) - 
-               jt.minimum(pred_boxes_xyxy[:, 2], target_boxes_xyxy[:, 2])
-        c_y = jt.maximum(pred_boxes_xyxy[:, 1], target_boxes_xyxy[:, 1]) - 
-               jt.minimum(pred_boxes_xyxy[:, 3], target_boxes_xyxy[:, 3])
+        c_x = (jt.maximum(pred_boxes_xyxy[:, 0], target_boxes_xyxy[:, 0]) - 
+               jt.minimum(pred_boxes_xyxy[:, 2], target_boxes_xyxy[:, 2]))
+        c_y = (jt.maximum(pred_boxes_xyxy[:, 1], target_boxes_xyxy[:, 1]) - 
+               jt.minimum(pred_boxes_xyxy[:, 3], target_boxes_xyxy[:, 3]))
         c_squared = c_x ** 2 + c_y ** 2 + 1e-7
         
         # Calculate squared distance between center points
-        rho_squared = (pred_cx - target_cy) ** 2 + (pred_cy - target_cy) ** 2
+        rho_squared = (pred_cx - target_cx) ** 2 + (pred_cy - target_cy) ** 2
         
         # Calculate IoU
         iou = box_iou(pred_boxes_xyxy, target_boxes_xyxy).diag()
