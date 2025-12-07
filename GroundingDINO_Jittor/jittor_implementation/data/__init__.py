@@ -16,6 +16,11 @@ from .dataset import (
     build_dataset
 )
 
+from .lvis_dataset import (
+    LVISDetectionDataset,
+    build_lvis_dataset
+)
+
 from .sampler import (
     LVISSampler,
     BalancedSampler,
@@ -35,8 +40,10 @@ __all__ = [
     'Normalize',
     'build_transforms',
     'LVISDataset',
+    'LVISDetectionDataset',
     'ODVGDataset',
     'build_dataset',
+    'build_lvis_dataset',
     'LVISSampler',
     'BalancedSampler',
     'DistributedSampler',
