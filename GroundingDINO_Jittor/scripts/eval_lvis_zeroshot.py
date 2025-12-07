@@ -542,9 +542,11 @@ def main():
     args = parser.parse_args()
     
     # 设置 Jittor
-    if args.use_gpu:
+    if not args.no_gpu:
         jt.flags.use_cuda = 1
         print("Using GPU")
+    else:
+        print("Using CPU")
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)

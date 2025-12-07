@@ -245,28 +245,32 @@ def main():
     parser.add_argument('--lr_backbone', type=float, default=1e-5, help='Backbone 学习率')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='权重衰减')
     
-    # 冻结参数
-    parser.add_argument('--freeze_backbone', action='store_true', default=True,
-                        help='冻结 backbone')
-    parser.add_argument('--freeze_text_encoder', action='store_true', default=True,
-                        help='冻结文本编码器')
+    # 冻结参数 (默认冻结)
+    parser.add_argument('--unfreeze_backbone', action='store_true', default=False,
+                        help='解冻 backbone (默认冻结)')
+    parser.add_argument('--unfreeze_text_encoder', action='store_true', default=False,
+                        help='解冻文本编码器 (默认冻结)')
     
     # 其他参数
     parser.add_argument('--log_interval', type=int, default=10, help='日志间隔')
     parser.add_argument('--save_interval', type=int, default=1, help='保存间隔')
     parser.add_argument('--num_workers', type=int, default=4, help='数据加载线程数')
-    parser.add_argument('--use_gpu', action='store_true', default=True, help='使用 GPU')
+    parser.add_argument('--no_gpu', action='store_true', default=False, help='禁用 GPU')
     parser.add_argument('--test_only', action='store_true', help='只测试，不训练')
     
     config = parser.parse_args()
     
     # 设置 Jittor
-    if config.use_gpu:
+    if not config.no_gpu:
         jt.flags.use_cuda = 1
         print("使用 GPU 加速")
     else:
         jt.flags.use_cuda = 0
         print("使用 CPU")
+    
+    # 设置冻结标志
+    config.freeze_backbone = not config.unfreeze_backbone
+    config.freeze_text_encoder = not config.unfreeze_text_encoder
     
     # 创建输出目录
     os.makedirs(config.output_dir, exist_ok=True)

@@ -117,8 +117,7 @@ python scripts/eval_lvis_zeroshot.py \
     --image_dir "$IMAGE_DIR" \
     --output_dir "$ZEROSHOT_OUTPUT" \
     --box_threshold 0.25 \
-    --nms_threshold 0.5 \
-    --use_gpu
+    --nms_threshold 0.5
 
 echo "Zero-shot results saved to $ZEROSHOT_OUTPUT"
 
@@ -143,12 +142,9 @@ python scripts/finetune_lvis.py \
     --batch_size $BATCH_SIZE \
     --lr $LR \
     --num_workers $NUM_WORKERS \
-    --freeze_backbone \
-    --freeze_text_encoder \
     --log_interval 100 \
     --save_interval 2 \
-    --eval_interval 1 \
-    --use_gpu
+    --eval_interval 1
 
 echo "Fine-tuning completed. Models saved to $FINETUNE_OUTPUT"
 
@@ -170,8 +166,7 @@ python scripts/eval_lvis_zeroshot.py \
     --image_dir "$IMAGE_DIR" \
     --output_dir "$FINETUNED_OUTPUT" \
     --box_threshold 0.25 \
-    --nms_threshold 0.5 \
-    --use_gpu
+    --nms_threshold 0.5
 
 echo "Fine-tuned model results saved to $FINETUNED_OUTPUT"
 

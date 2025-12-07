@@ -596,9 +596,11 @@ def main():
     args = parser.parse_args()
     
     # 设置 Jittor
-    if args.use_gpu:
+    if not args.no_gpu:
         jt.flags.use_cuda = 1
         print("Using GPU")
+    else:
+        print("Using CPU")
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
@@ -610,8 +612,8 @@ def main():
     config.lr = args.lr
     config.lr_backbone = args.lr_backbone
     config.weight_decay = args.weight_decay
-    config.freeze_backbone = args.freeze_backbone and not args.unfreeze_backbone
-    config.freeze_text_encoder = args.freeze_text_encoder
+    config.freeze_backbone = not args.unfreeze_backbone
+    config.freeze_text_encoder = not args.unfreeze_text_encoder
     config.log_interval = args.log_interval
     config.save_interval = args.save_interval
     config.eval_interval = args.eval_interval
@@ -784,4 +786,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

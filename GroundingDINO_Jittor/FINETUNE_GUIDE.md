@@ -119,11 +119,12 @@ python scripts/eval_lvis_zeroshot.py \
     --image_dir data/coco \
     --output_dir outputs/lvis_zeroshot \
     --box_threshold 0.25 \
-    --nms_threshold 0.5 \
-    --use_gpu
+    --nms_threshold 0.5
 ```
 
 **输出：** `predictions.json` (COCO 格式预测结果) 和 `results.json` (评估指标)
+
+> 默认使用 GPU，如需禁用 GPU 请添加 `--no_gpu` 参数。
 
 ---
 
@@ -140,11 +141,10 @@ python scripts/finetune_lvis.py \
     --output_dir outputs/lvis_finetune \
     --epochs 12 \
     --batch_size 4 \
-    --lr 1e-4 \
-    --freeze_backbone \
-    --freeze_text_encoder \
-    --use_gpu
+    --lr 1e-4
 ```
+
+> 默认冻结 backbone 和 text encoder，如需解冻请添加 `--unfreeze_backbone` 或 `--unfreeze_text_encoder`。
 
 ### 5.2 完整参数列表
 
@@ -160,12 +160,13 @@ python scripts/finetune_lvis.py \
 | `--lr` | 1e-4 | 学习率 |
 | `--lr_backbone` | 1e-5 | Backbone 学习率 |
 | `--weight_decay` | 0.0001 | 权重衰减 |
-| `--freeze_backbone` | True | 冻结 Backbone |
-| `--freeze_text_encoder` | True | 冻结文本编码器 |
+| `--unfreeze_backbone` | False | 解冻 Backbone (默认冻结) |
+| `--unfreeze_text_encoder` | False | 解冻文本编码器 (默认冻结) |
 | `--num_workers` | 4 | 数据加载线程数 |
 | `--log_interval` | 50 | 日志打印间隔 |
 | `--save_interval` | 1 | 模型保存间隔 |
 | `--resume` | None | 从检查点恢复训练 |
+| `--no_gpu` | False | 禁用 GPU |
 
 ### 5.3 微调策略建议
 
