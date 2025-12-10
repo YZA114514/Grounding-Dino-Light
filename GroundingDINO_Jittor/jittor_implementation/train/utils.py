@@ -30,7 +30,7 @@ def seed_everything(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
-def save_model(model: nn.Module, optimizer: jt.optim.Optimizer, scheduler: jt.optim.lr_scheduler._LRScheduler,
+def save_model(model: nn.Module, optimizer: jt.optim.Optimizer, scheduler: jt.optim.LRScheduler,
                epoch: int, loss: float, output_dir: str, name: str = "model"):
     """Save model checkpoint"""
     checkpoint = {
@@ -51,7 +51,7 @@ def save_model(model: nn.Module, optimizer: jt.optim.Optimizer, scheduler: jt.op
     return filename
 
 
-def load_model(model: nn.Module, optimizer: jt.optim.Optimizer = None, scheduler: jt.optim.lr_scheduler._LRScheduler = None,
+def load_model(model: nn.Module, optimizer: jt.optim.Optimizer = None, scheduler: jt.optim.LRScheduler = None,
                checkpoint_path: str = None, resume_training: bool = True):
     """Load model checkpoint"""
     if checkpoint_path is None or not os.path.isfile(checkpoint_path):
@@ -544,13 +544,13 @@ def create_optimizer(model: nn.Module, config: TrainingConfig):
 def create_scheduler(optimizer: jt.optim.Optimizer, config: TrainingConfig):
     """Create learning rate scheduler"""
     if config.lr_scheduler == "step":
-        scheduler = jt.optim.lr_scheduler.MultiStepLR(
+        scheduler = jt.optim.MultiStepLR(
             optimizer,
             milestones=[config.lr_drop],
             gamma=0.1
         )
     elif config.lr_scheduler == "cosine":
-        scheduler = jt.optim.lr_scheduler.CosineAnnealingLR(
+        scheduler = jt.optim.CosineAnnealingLR(
             optimizer,
             T_max=config.epochs,
             eta_min=config.min_lr

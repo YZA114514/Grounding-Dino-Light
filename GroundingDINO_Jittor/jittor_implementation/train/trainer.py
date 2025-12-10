@@ -35,7 +35,7 @@ class Trainer:
     def __init__(self, model: nn.Module, text_encoder: BERTWrapper, 
                  train_loader: DataLoader, val_loader: Optional[DataLoader],
                  criterion: nn.Module, optimizer: jt.optim.Optimizer,
-                 scheduler: Optional[jt.optim.lr_scheduler._LRScheduler],
+                 scheduler: Optional[jt.optim.LRScheduler],
                  config: TrainingConfig):
         """
         Initialize trainer
@@ -187,11 +187,11 @@ class Trainer:
         
         return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     
-    @jt.no_grad
     def evaluate(self, epoch: int):
         """Evaluate model on validation set"""
-        if self.val_loader is None:
-            return {}
+        with jt.no_grad():
+            if self.val_loader is None:
+                return {}
         
         self.model.eval()
         self.text_encoder.eval()

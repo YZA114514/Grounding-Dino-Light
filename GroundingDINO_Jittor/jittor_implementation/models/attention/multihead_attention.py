@@ -131,7 +131,7 @@ class MultiheadAttention(nn.Module):
             attn_weights = self.dropout_layer(attn_weights)
         
         # 应用注意力权重: (N, num_heads, L, S) @ (N, num_heads, S, head_dim) = (N, num_heads, L, head_dim)
-        output = jt.matmul(attn_weights, v)
+        output = jt.matmul(attn_weights.float32(), v.float32())
         
         # 重塑回原始格式: (N, num_heads, L, head_dim) -> (L, N, num_heads, head_dim) -> (L, N, E)
         output = output.permute(2, 0, 1, 3).reshape(tgt_len, bsz, embed_dim)

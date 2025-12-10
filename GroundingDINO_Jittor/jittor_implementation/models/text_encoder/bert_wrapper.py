@@ -52,7 +52,8 @@ class BertModelWarper(nn.Module):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
         
-        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        # device = input_ids.device if input_ids is not None else inputs_embeds.device
+        device = "cuda" # Jittor auto-manages device
         
         # Set defaults
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -183,7 +184,9 @@ class BERTWrapper(nn.Module):
     
     def set_feat_map(self, feat_map):
         """Set feature mapping layer"""
+        print(f"Setting feat_map: {feat_map}")
         self.feat_map = feat_map
+        print(f"feat_map set to: {self.feat_map}")
     
     def execute(self, text: Union[str, List[str]], sub_sentence_present=True):
         """
@@ -196,6 +199,7 @@ class BERTWrapper(nn.Module):
         Returns:
             Dict containing encoded text and related masks
         """
+        print(f"In execute: self.feat_map is {self.feat_map}")  # DEBUG
         # Tokenize text
         if isinstance(text, str):
             text = [text]
@@ -241,17 +245,59 @@ class BERTWrapper(nn.Module):
         else:
             tokenized_for_encoder = tokenized
         
-        # Run BERT
-        bert_output = self.text_encoder(**tokenized_for_encoder)
+        # Run BERT (using PyTorch backend for this part)
+        import torch
         
-        # Get last hidden state
-        last_hidden_state = bert_output.last_hidden_state if hasattr(bert_output, 'last_hidden_state') else bert_output[0]
+        # Convert inputs to PyTorch
+        pt_inputs = {}
+        for k, v in tokenized_for_encoder.items():
+            if isinstance(v, jt.Var):
+                pt_inputs[k] = torch.from_numpy(v.numpy())
+            else:
+                pt_inputs[k] = v
+        
+        # Ensure attention_mask is float for PyTorch BERT if it's a boolean mask
+        # PyTorch BERT expects float mask (0.0 for keep, -10000.0 for mask) if it's 3D/4D
+        # Or boolean mask (True for keep, False for mask) depending on version.
+        # But standard BERT usually takes 2D mask. 
+        # If we pass 3D mask, we might need to adjust.
+        # However, let's try passing it as is first, but convert to int/float if needed.
+        
+        # Run PyTorch model
+        with torch.no_grad():
+            # self.bert is the PyTorch model
+            bert_output = self.bert(**pt_inputs)
+        
+        # Get last hidden state and convert to Jittor
+        last_hidden_state_pt = bert_output.last_hidden_state if hasattr(bert_output, 'last_hidden_state') else bert_output[0]
+        
+        # DEBUG
+        print(f"BERT last_hidden_state_pt stats: min={last_hidden_state_pt.min().item()}, max={last_hidden_state_pt.max().item()}")
+        
+        last_hidden_state = jt.array(last_hidden_state_pt.numpy())
+        
+        # DEBUG: Check feat_map weights
+        if self.feat_map is not None:
+            print(f"feat_map.weight stats: min={self.feat_map.weight.min()}, max={self.feat_map.weight.max()}")
+            print(f"feat_map.bias stats: min={self.feat_map.bias.min()}, max={self.feat_map.bias.max()}")
+            print(f"feat_map.weight shape: {self.feat_map.weight.shape}")
+            print(f"last_hidden_state shape: {last_hidden_state.shape}")
         
         # Apply feature mapping if available
         if self.feat_map is not None:
+            print(f"Before feat_map: min={last_hidden_state.min()}, max={last_hidden_state.max()}")
+            # Let's manually compute to check
+            manual_output = last_hidden_state @ self.feat_map.weight.t() + self.feat_map.bias
+            print(f"Manual computation: min={manual_output.min()}, max={manual_output.max()}")
             encoded_text = self.feat_map(last_hidden_state)
+            print(f"After feat_map: min={encoded_text.min()}, max={encoded_text.max()}")
+            diff = (manual_output - encoded_text).abs().max()
+            print(f"Max difference: {diff}")
         else:
             encoded_text = last_hidden_state
+        
+        # Ensure float32 dtype for consistency
+        encoded_text = encoded_text.float32()
         
         # Get token mask
         text_token_mask = tokenized.attention_mask.bool()
@@ -296,7 +342,8 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
     idxs = jt.nonzero(special_tokens_mask)
     
     # Generate attention mask and positional IDs
-    attention_mask = jt.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
+    # attention_mask = jt.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
+    attention_mask = (jt.init.eye(num_token, dtype=jt.float32) > 0.5).unsqueeze(0).repeat(bs, 1, 1)
     position_ids = jt.zeros((bs, num_token), dtype=jt.int64)
     
     previous_col = 0
@@ -338,7 +385,7 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     idxs = jt.nonzero(special_tokens_mask)
     
     # Generate attention mask and positional IDs
-    attention_mask = jt.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
+    attention_mask = jt.init.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
     position_ids = jt.zeros((bs, num_token), dtype=jt.int64)
     cate_to_token_mask_list = [[] for _ in range(bs)]
     

@@ -119,10 +119,12 @@ def load_pytorch_weights(weight_path: str) -> Dict[str, np.ndarray]:
     numpy_weights = OrderedDict()
     for name, tensor in state_dict.items():
         if isinstance(tensor, torch.Tensor):
-            numpy_weights[name] = tensor.detach().cpu().numpy()
+            # 去除 module. 前缀（来自 DDP 训练）
+            clean_name = name.replace("module.", "") if name.startswith("module.") else name
+            numpy_weights[clean_name] = tensor.detach().cpu().numpy()
         else:
-            # 可能是标量或其他类型
-            numpy_weights[name] = np.array(tensor)
+            # 跳过非张量对象（如配置对象）
+            print(f"跳过非张量对象: {name} (类型: {type(tensor).__name__})")
     
     print(f"成功加载 {len(numpy_weights)} 个权重")
     

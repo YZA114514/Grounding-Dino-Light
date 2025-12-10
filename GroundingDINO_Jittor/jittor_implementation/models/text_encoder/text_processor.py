@@ -198,7 +198,8 @@ class TextProcessor:
         
         # Generate attention mask between special tokens
         num_tokens = len(input_ids)
-        attention_mask_matrix = jt.eye(num_tokens, dtype=jt.bool)
+        # attention_mask_matrix = jt.eye(num_tokens, dtype=jt.bool)
+        attention_mask_matrix = (jt.init.eye(num_tokens, dtype=jt.float32) > 0.5)
         position_ids = jt.zeros(num_tokens, dtype=jt.int64)
         cate_to_token_masks = []
         

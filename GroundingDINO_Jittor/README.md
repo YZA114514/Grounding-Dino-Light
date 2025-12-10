@@ -2,6 +2,20 @@
 
 This project is a Jittor implementation of GroundingDINO, as part of the 2025 Final Project.
 
+## Environment Setup
+
+To run this project, you must use the provided virtual environment where Jittor and other dependencies are installed.
+
+```bash
+source /root/shared-nvme/GroundingDINO-Light/.venv/bin/activate
+```
+
+Or run python directly from the virtual environment:
+
+```bash
+/root/shared-nvme/GroundingDINO-Light/.venv/bin/python <script_name>.py
+```
+
 ## Project Structure
 
 The project structure is organized based on the roles and responsibilities defined in the team plan:

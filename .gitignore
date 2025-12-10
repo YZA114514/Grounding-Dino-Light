@@ -49,23 +49,33 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Temporary files
+# Test files
+test_*.py
+check_*.py
+inspect_*.py
+debug_*.py
+visualize_*.py
+
+# Temp files
 *.tmp
 *.temp
 tmp/
 temp/
 
-# Model checkpoints and weights (uncomment if you don't want to upload large model files)
-# *.pth
-# *.pt
-# *.ckpt
-# *.h5
+# Data directories
+data/
+datasets/
+images/
+annotations/
+LVIS/
+val2017/
+inference_results/
 
-# Data directories (uncomment if you don't want to upload dataset files)
-# data/
-# datasets/
-# images/
-# annotations/
+# Large model files
+*.pth
+*.pkl
+*.ckpt
+*.h5
 
 # Output directories
 output/

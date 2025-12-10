@@ -97,7 +97,7 @@ def hflip(image: PIL.Image.Image, target: Dict[str, Any]) -> Tuple[PIL.Image.Ima
     
     if "masks" in target:
         masks = jt.Var(target["masks"])
-        target["masks"] = jt.flip(masks, dims=[2]).numpy().tolist()
+        target["masks"] = jt.flip(masks, dim=2).numpy().tolist()
     
     return flipped_image, target
 
