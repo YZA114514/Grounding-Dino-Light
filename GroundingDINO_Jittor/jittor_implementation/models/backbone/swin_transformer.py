@@ -15,7 +15,31 @@ import numpy as np
 import jittor as jt
 import jittor.nn as nn
 # import jittor.utils.checkpoint as checkpoint  # Jittor may not have checkpoint
-from timm.models.layers import DropPath, to_2tuple
+# from timm.models.layers import DropPath, to_2tuple
+import collections.abc
+
+def to_2tuple(x):
+    if isinstance(x, collections.abc.Iterable):
+        return x
+    return tuple([x, x])
+
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+    """
+    def __init__(self, drop_prob=None):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+
+    def execute(self, x):
+        if self.drop_prob == 0. or not self.is_training():
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+        random_tensor = keep_prob + jt.rand(shape, dtype=x.dtype)
+        random_tensor = random_tensor.floor()  # binarize
+        output = x.div(keep_prob) * random_tensor
+        return output
+
 # from timm.models.layers import trunc_normal_
 
 
@@ -117,9 +141,7 @@ class WindowAttention(nn.Module):
         self.scale = qk_scale or head_dim**-0.5
 
         # define a parameter table of relative position bias
-        self.relative_position_bias_table = nn.Parameter(
-            jt.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
-        )  # 2*Wh-1 * 2*Ww-1, nH
+        self.relative_position_bias_table = jt.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)  # 2*Wh-1 * 2*Ww-1, nH
 
         # get pair-wise relative position index for each token inside the window
         coords_h = jt.arange(self.window_size[0])
@@ -589,9 +611,7 @@ class SwinTransformer(nn.Module):
                 pretrain_img_size[1] // patch_size[1],
             ]
 
-            self.absolute_pos_embed = nn.Parameter(
-                jt.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
-            )
+            self.absolute_pos_embed = jt.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
             jt.nn.init.trunc_normal_(self.absolute_pos_embed, std=0.02)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
@@ -714,8 +734,13 @@ class SwinTransformer(nn.Module):
         #    (2, 768, 64, 64), (2, 1536, 32, 32)]
         return tuple(outs)
 
-    def execute(self, tensor_list: NestedTensor):
-        x = tensor_list.tensors
+    def execute(self, tensor_list):
+        if hasattr(tensor_list, 'tensors'):
+            x = tensor_list.tensors
+            m = tensor_list.mask
+        else:
+            x = tensor_list
+            m = None
 
         """Forward function."""
         x = self.patch_embed(x)
@@ -751,9 +776,11 @@ class SwinTransformer(nn.Module):
         # collect for nesttensors
         outs_dict = {}
         for idx, out_i in enumerate(outs):
-            m = tensor_list.mask
-            assert m is not None
-            mask = nn.interpolate(m[None].float(), size=out_i.shape[-2:]).bool()[0]
+            if m is not None:
+                mask = nn.interpolate(m[None].float(), size=out_i.shape[-2:]).bool()[0]
+            else:
+                bs, _, h, w = out_i.shape
+                mask = jt.zeros((bs, h, w), dtype=jt.bool)
             outs_dict[idx] = NestedTensor(out_i, mask)
 
         return outs_dict

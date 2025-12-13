@@ -254,6 +254,15 @@ class MSDeformAttn(nn.Module):
         Returns:
             output: 输出张量，形状与 query 相同
         """
+        # Force all inputs to correct dtypes to avoid float64/float32 mixing
+        if query is not None: query = query.float32()
+        if value is not None: value = value.float32()
+        if query_pos is not None: query_pos = query_pos.float32()
+        if reference_points is not None: reference_points = reference_points.float32()
+        if spatial_shapes is not None: spatial_shapes = spatial_shapes.int32()
+        if level_start_index is not None: level_start_index = level_start_index.int32()
+        if key_padding_mask is not None: key_padding_mask = key_padding_mask.bool()
+
         if value is None:
             value = query
         
@@ -272,10 +281,7 @@ class MSDeformAttn(nn.Module):
         assert spatial_shapes is not None, "spatial_shapes is required"
         # 计算总值数量（避免使用 .item()，改用 numpy）
         spatial_product = spatial_shapes[:, 0] * spatial_shapes[:, 1]
-        if hasattr(spatial_product, 'numpy'):
-            total_value = int(spatial_product.numpy().sum())
-        else:
-            total_value = int(spatial_product.sum())
+        total_value = int(spatial_product.sum().data)
         assert total_value == num_value, \
             f"spatial shapes sum {total_value} doesn't match num_value {num_value}"
         

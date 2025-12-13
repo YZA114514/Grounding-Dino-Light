@@ -31,7 +31,7 @@ class LanguageGuidedQuery(nn.Module):
         ])
         
         # Position encoding for queries
-        self.pos_embed = nn.Parameter(jt.randn(1, num_queries, hidden_dim))
+        self.pos_embed = jt.randn(1, num_queries, hidden_dim)
         
         # Layer normalization
         self.norm = nn.LayerNorm(hidden_dim)
@@ -82,7 +82,7 @@ class LanguageGuidedQuery(nn.Module):
                 query_embed_t,  # (num_queries, B, D)
                 text_proj_t,    # (L, B, D)
                 text_proj_t,    # (L, B, D)
-                key_padding_mask=~text_token_mask if text_token_mask is not None else None
+                key_padding_mask=jt.logical_not(text_token_mask) if text_token_mask is not None else None
             )[0]
             
             # Residual connection
@@ -146,7 +146,7 @@ class DynamicQueryGenerator(nn.Module):
         )
         
         # Base query embeddings
-        self.base_query = nn.Parameter(jt.randn(num_queries, hidden_dim))
+        self.base_query = jt.randn(num_queries, hidden_dim)
         
         # Layer normalization
         self.norm = nn.LayerNorm(hidden_dim)
@@ -175,7 +175,7 @@ class DynamicQueryGenerator(nn.Module):
             text_features_t,
             text_features_t,
             text_features_t,
-            key_padding_mask=~text_token_mask if text_token_mask is not None else None
+            key_padding_mask=jt.logical_not(text_token_mask) if text_token_mask is not None else None
         )
         aggregated_text = aggregated_text.transpose(0, 1)  # (B, L, D)
         
@@ -235,7 +235,7 @@ class AdaptiveQueryGenerator(nn.Module):
         )
         
         # Base query embeddings
-        self.base_queries = nn.Parameter(jt.randn(max_queries, hidden_dim))
+        self.base_queries = jt.randn(max_queries, hidden_dim)
         
         # Layer normalization
         self.norm = nn.LayerNorm(hidden_dim)
@@ -342,7 +342,7 @@ class TextConditionalQueryGenerator(nn.Module):
         ])
         
         # Learnable query tokens
-        self.query_tokens = nn.Parameter(jt.randn(1, num_queries, hidden_dim))
+        self.query_tokens = jt.randn(1, num_queries, hidden_dim)
         
         # Position encoding
         self.pos_encoding = PositionalEncoding(hidden_dim)

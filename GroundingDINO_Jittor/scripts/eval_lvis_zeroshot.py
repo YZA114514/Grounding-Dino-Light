@@ -114,39 +114,168 @@ def load_model(checkpoint_path: str, config: Config):
     print(f"Loading model from {checkpoint_path}...")
     
     from jittor_implementation.models.groundingdino import GroundingDINO
+    from jittor_implementation.models.backbone.swin_transformer import SwinTransformer, build_swin_transformer
+    
+    # 创建 backbone
+    backbone = build_swin_transformer(
+        modelname="swin_T_224_1k",
+        pretrain_img_size=224,
+        out_indices=(1, 2, 3),  # 输出 stage 2, 3, 4 的特征
+        dilation=False,
+    )
     
     # 创建模型
+    # 注意：官方预训练权重使用 dec_pred_bbox_embed_share=False (每层独立的 bbox_embed)
     model = GroundingDINO(
+        backbone=backbone,
         num_queries=900,
         hidden_dim=256,
         num_feature_levels=4,
         nheads=8,
         max_text_len=256,
+        two_stage_type="standard",  # 使用 two-stage
+        dec_pred_bbox_embed_share=False,  # 官方权重使用独立的 bbox_embed
+        two_stage_class_embed_share=True,
+        two_stage_bbox_embed_share=False,  # enc_out_bbox_embed 也是独立的
     )
     
     # 加载权重
     with open(checkpoint_path, 'rb') as f:
         weights = pickle.load(f)
     
-    # 清理权重名称
+    print(f"Checkpoint has {len(weights)} weights")
+    
+    # 清理权重名称 (去除 module. 前缀) 并应用名称映射
     cleaned = {}
     for k, v in weights.items():
-        if k.startswith('module.'):
-            k = k[7:]
-        cleaned[k] = v
+        new_k = k
+        if new_k.startswith('module.'):
+            new_k = new_k[7:]
+        
+        # 应用名称映射规则
+        # 1. backbone.0. -> backbone. (checkpoint 使用 backbone.0 表示第一个 backbone)
+        if new_k.startswith('backbone.0.'):
+            new_k = 'backbone.' + new_k[11:]
+        
+        # 2. transformer.level_embed -> level_embed
+        if new_k == 'transformer.level_embed':
+            new_k = 'level_embed'
+        
+        # 3. transformer.tgt_embed.weight -> tgt_embed.weight
+        if new_k == 'transformer.tgt_embed.weight':
+            new_k = 'tgt_embed.weight'
+        
+        # 4. transformer.encoder. 保持不变 (已经匹配)
+        # 5. transformer.decoder. 保持不变 (已经匹配)
+        
+        # 6. transformer.enc_output.* -> enc_output.*
+        if new_k.startswith('transformer.enc_output'):
+            new_k = new_k.replace('transformer.enc_output', 'enc_output')
+        
+        # 7. bbox_embed.X.* -> transformer.decoder.bbox_embed.X.* (顶层 bbox_embed 映射到 decoder)
+        if new_k.startswith('bbox_embed.'):
+            new_k = 'transformer.decoder.' + new_k
+        
+        cleaned[new_k] = v
     
-    # 加载到模型
+    # 分离 BERT 权重和其他权重
+    bert_weights = {}
+    other_weights = {}
+    for k, v in cleaned.items():
+        if k.startswith('bert.'):
+            bert_weights[k] = v
+        else:
+            other_weights[k] = v
+    
+    print(f"  - BERT weights: {len(bert_weights)}")
+    print(f"  - Other weights: {len(other_weights)}")
+    
+    # 处理 in_proj_weight/bias 到 q_proj/k_proj/v_proj 的转换
+    # PyTorch MultiheadAttention 使用合并的 in_proj，而 Jittor 实现可能使用分开的 q/k/v proj
+    # 这适用于 self_attn 和 ca_text 等所有使用 MultiheadAttention 的地方
+    converted_weights = {}
+    for k, v in other_weights.items():
+        if '.in_proj_weight' in k:
+            # 拆分 in_proj_weight [3*d, d] -> q_proj [d, d], k_proj [d, d], v_proj [d, d]
+            d = v.shape[0] // 3
+            base_key = k.replace('.in_proj_weight', '.')
+            converted_weights[base_key + 'q_proj.weight'] = v[:d, :]
+            converted_weights[base_key + 'k_proj.weight'] = v[d:2*d, :]
+            converted_weights[base_key + 'v_proj.weight'] = v[2*d:, :]
+        elif '.in_proj_bias' in k:
+            # 拆分 in_proj_bias [3*d] -> q_proj [d], k_proj [d], v_proj [d]
+            d = v.shape[0] // 3
+            base_key = k.replace('.in_proj_bias', '.')
+            converted_weights[base_key + 'q_proj.bias'] = v[:d]
+            converted_weights[base_key + 'k_proj.bias'] = v[d:2*d]
+            converted_weights[base_key + 'v_proj.bias'] = v[2*d:]
+        else:
+            converted_weights[k] = v
+    
+    other_weights = converted_weights
+    
+    # 加载非 BERT 权重到模型
     model_state = model.state_dict()
     loaded = 0
-    for k, v in cleaned.items():
-        if k in model_state and model_state[k].shape == tuple(v.shape):
-            model_state[k] = jt.array(v)
-            loaded += 1
+    missing_in_model = []
+    missing_in_ckpt = []
+    shape_mismatch = []
+    
+    for k, v in other_weights.items():
+        if k in model_state:
+            if model_state[k].shape == tuple(v.shape):
+                model_state[k] = jt.array(v)
+                loaded += 1
+            else:
+                shape_mismatch.append(f"{k}: model {model_state[k].shape} vs ckpt {v.shape}")
+        else:
+            missing_in_model.append(k)
+    
+    # 检查模型中有但权重中没有的
+    for k in model_state.keys():
+        if k not in other_weights and not k.startswith('text_encoder.bert.'):
+            missing_in_ckpt.append(k)
     
     model.load_state_dict(model_state)
+    
+    # 加载 BERT 权重到纯 Jittor BERT
+    if hasattr(model, 'text_encoder') and hasattr(model.text_encoder, 'bert'):
+        print("Loading BERT weights into pure Jittor BERT...")
+        
+        # 将 bert_weights 转换为带正确前缀的格式
+        # bert.embeddings.xxx -> embeddings.xxx
+        bert_state = model.text_encoder.bert.state_dict()
+        bert_loaded = 0
+        
+        for k, v in bert_weights.items():
+            # bert.xxx -> xxx
+            bert_key = k[5:] if k.startswith('bert.') else k
+            if bert_key in bert_state:
+                if bert_state[bert_key].shape == tuple(v.shape):
+                    bert_state[bert_key] = jt.array(v)
+                    bert_loaded += 1
+                else:
+                    print(f"  BERT shape mismatch: {bert_key}: {bert_state[bert_key].shape} vs {v.shape}")
+        
+        model.text_encoder.bert.load_state_dict(bert_state)
+        print(f"  Loaded {bert_loaded}/{len(bert_weights)} BERT weights")
+    
     model.eval()
     
-    print(f"Loaded {loaded}/{len(cleaned)} weights")
+    print(f"\nWeight loading summary:")
+    print(f"  - Loaded: {loaded}/{len(other_weights)} non-BERT weights")
+    if shape_mismatch:
+        print(f"  - Shape mismatches: {len(shape_mismatch)}")
+        for s in shape_mismatch[:3]:
+            print(f"      {s}")
+    if missing_in_model:
+        print(f"  - Weights not in model: {len(missing_in_model)}")
+        for m in missing_in_model[:3]:
+            print(f"      {m}")
+    if missing_in_ckpt:
+        print(f"  - Model params not in checkpoint: {len(missing_in_ckpt)}")
+        for m in missing_in_ckpt[:3]:
+            print(f"      {m}")
     
     return model
 
@@ -197,7 +326,18 @@ class LVISEvaluationDataset:
         """获取图像"""
         img_id = self.image_ids[idx]
         img_info = self.images[img_id]
-        img_path = os.path.join(self.image_dir, img_info['file_name'])
+        
+        # LVIS 格式可能没有 file_name，需要从 coco_url 提取
+        if 'file_name' in img_info:
+            file_name = img_info['file_name']
+        elif 'coco_url' in img_info:
+            # 从 coco_url 提取文件名: http://images.cocodataset.org/val2017/000000397133.jpg -> 000000397133.jpg
+            file_name = img_info['coco_url'].split('/')[-1]
+        else:
+            # 使用 image_id 构造文件名
+            file_name = f"{img_id:012d}.jpg"
+        
+        img_path = os.path.join(self.image_dir, file_name)
         image = Image.open(img_path).convert('RGB')
         return image, img_id, img_info
     
@@ -542,7 +682,7 @@ def main():
     args = parser.parse_args()
     
     # 设置 Jittor
-    if not args.no_gpu:
+    if args.use_gpu:
         jt.flags.use_cuda = 1
         print("Using GPU")
     else:

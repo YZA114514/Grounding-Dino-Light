@@ -115,13 +115,21 @@ class ContrastiveEmbed(nn.Module):
         # 计算相似度矩阵
         # x: [bs, nq, d_model], y: [bs, n_text, d_model]
         # res: [bs, nq, n_text]
+        
         res = jt.matmul(x, y.transpose(-1, -2))
         
         # 对padding位置填充-inf
         # text_token_mask: [bs, n_text] -> [bs, 1, n_text]
         # Jittor 不支持 ~ 操作符，使用 logical_not 或 1 - x
         mask = (1 - text_token_mask.unsqueeze(1).float()).bool()  # True表示padding
-        res = jt.where(mask, jt.full_like(res, float("-inf")), res)
+        
+        # DEBUG
+        # print(f"ContrastiveEmbed: res max={res.max().data}, min={res.min().data}")
+        # print(f"ContrastiveEmbed: mask sum={mask.sum().data}")
+        
+        # res = jt.where(mask, jt.full_like(res, float("-inf")), res)
+        # Use a large negative number instead of -inf to avoid NaN issues in sigmoid
+        res = jt.where(mask, jt.full_like(res, -1e9), res)
 
         # 填充到固定长度
         bs, nq, n_text = res.shape

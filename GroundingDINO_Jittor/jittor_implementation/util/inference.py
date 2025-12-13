@@ -396,7 +396,20 @@ class GroundingDINOInference:
         """初始化 tokenizer"""
         try:
             from transformers import BertTokenizer
-            self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            import os
+            # Check for local BERT model path
+            local_bert_paths = [
+                os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'bert-base-uncased'),
+                'models/bert-base-uncased',
+                './models/bert-base-uncased',
+            ]
+            bert_path = 'bert-base-uncased'
+            for local_path in local_bert_paths:
+                if os.path.exists(local_path) and os.path.isdir(local_path):
+                    bert_path = os.path.abspath(local_path)
+                    print(f"Using local BERT tokenizer: {bert_path}")
+                    break
+            self.tokenizer = BertTokenizer.from_pretrained(bert_path)
             self.use_bert = True
             print("Using BERT tokenizer")
         except ImportError:
