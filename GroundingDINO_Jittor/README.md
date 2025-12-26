@@ -178,6 +178,7 @@ python scripts/convert_weights_pytorch_to_jittor.py \
 转换完成！
 ```
 ### 下载bert模型放在Grounding-Dino-Light/GroundingDINO_Jittor/models
+### 下载数据到Grounding-Dino-Light/GroundingDINO_Jittor/data/coco/val2017；Grounding-Dino-Light/GroundingDINO_Jittor/data/lvis_notation
 
 ### 3. 运行推理
 
@@ -227,6 +228,48 @@ python scripts/eval_lvis_zeroshot_full.py \
     --image_dir data/coco/val2017 \
     --output_dir outputs
 ```
+
+### LVIS Fine-tuning
+
+Fine-tune Grounding DINO on LVIS dataset to achieve **AP 52.1** (target from paper):
+
+```bash
+# Quick test (verify script works)
+python scripts/finetune_lvis_full.py --test_only --num_samples 10 --epochs 2 --gpu 4
+
+# Full fine-tuning (recommended settings from paper)
+python scripts/finetune_lvis_full.py \
+    --epochs 20 \
+    --batch_size 4 \
+    --lr 1e-4 \
+    --lr_backbone 1e-5 \
+    --lr_drop 15 \
+    --output_dir outputs/finetune_lvis \
+    --gpu 4
+
+# With frozen backbone (faster, less memory)
+python scripts/finetune_lvis_full.py \
+    --epochs 20 \
+    --batch_size 8 \
+    --freeze_backbone \
+    --output_dir outputs/finetune_frozen_backbone \
+    --gpu 4
+```
+
+**Fine-tuning Targets:**
+
+| Metric | Target |
+|--------|--------|
+| AP | 52.1% |
+| APr (rare) | 35.4% |
+| APc (common) | 51.3% |
+| APf (frequent) | 55.7% |
+
+**Training Notes:**
+- Full training on LVIS (~100K images) takes approximately 40-60 hours on a single GPU
+- Recommended: Use multi-GPU training or freeze backbone to reduce training time
+- Learning rate drops by 10x at epoch 15 (configurable via `--lr_drop`)
+- Checkpoints saved every 5 epochs and at best validation loss
 
 ### 推理示例
 
