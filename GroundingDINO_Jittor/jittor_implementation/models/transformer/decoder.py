@@ -285,7 +285,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         # 使用多尺度可变形注意力
         tgt2 = self.cross_attn(
             query=self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
-            reference_points=tgt_reference_points.transpose(0, 1),
+            reference_points=tgt_reference_points.transpose(0, 1).contiguous(),  # IMPORTANT: contiguous like PyTorch
             value=memory.transpose(0, 1),
             spatial_shapes=memory_spatial_shapes,
             level_start_index=memory_level_start_index,
@@ -413,7 +413,7 @@ class TransformerDecoder(nn.Module):
         intermediate = []
         reference_points = jt.sigmoid(refpoints_unsigmoid)
         ref_points = [reference_points]
-        print("Starting Decoder Loop")
+        # print("Starting Decoder Loop")
 
         for layer_id, layer in enumerate(self.layers):
             # 准备参考点输入
@@ -440,7 +440,7 @@ class TransformerDecoder(nn.Module):
             query_pos = pos_scale * raw_query_pos
 
             # 解码器层前向传播
-            print(f"--- Decoder Layer {layer_id} Start ---")
+            # print(f"--- Decoder Layer {layer_id} Start ---")
             output = layer(
                 tgt=output,
                 tgt_query_pos=query_pos,
@@ -457,7 +457,7 @@ class TransformerDecoder(nn.Module):
                 self_attn_mask=tgt_mask,
                 cross_attn_mask=memory_mask,
             )
-            print(f"--- Decoder Layer {layer_id} End ---")
+            # print(f"--- Decoder Layer {layer_id} End ---")
             # print(f"Layer {layer_id} output: min={output.min()}, max={output.max()}, mean={output.mean()}")
 
             # 迭代式边界框细化

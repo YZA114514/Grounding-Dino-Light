@@ -8,6 +8,18 @@ from .bert_wrapper import (
     BaseModelOutputWithPoolingAndCrossAttentions
 )
 
+from .bert_jittor import (
+    BertModel,
+    BertEmbeddings,
+    BertEncoder,
+    BertLayer,
+    BertAttention,
+    BertSelfAttention,
+    BertPooler,
+    load_bert_weights_from_dict,
+    SimpleTokenizer,
+)
+
 from .text_processor import (
     TextProcessor,
     PhraseProcessor

@@ -245,17 +245,18 @@ class DeformableTransformerEncoderLayer(nn.Module):
             src: 编码后的特征 [bs, sum(hi*wi), d_model]
         """
         # DEBUG
-        print(f"Encoder Layer src shape: {src.shape}")
+        # print(f"Encoder Layer src shape: {src.shape}")
 
         # 使用多尺度可变形注意力
+        # Note: MSDeformAttn is configured with batch_first=True, expects [bs, hw, c]
         src2 = self.self_attn(
-            query=self.with_pos_embed(src, pos).transpose(0, 1),
+            query=self.with_pos_embed(src, pos),  # [bs, hw, c]
             reference_points=reference_points,
-            value=src.transpose(0, 1),
+            value=src,  # [bs, hw, c]
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             key_padding_mask=key_padding_mask,
-        ).transpose(0, 1)
+        )
         
         src = src + self.dropout1(src2)
         src = self.norm1(src)
@@ -320,10 +321,12 @@ class TransformerEncoderLayer(nn.Module):
             pos: 位置编码 [seq_len, batch, d_model]
         """
         # 处理注意力掩码
+        # 与 PyTorch 一致：src_mask.repeat(nhead, 1, 1) 是把整个 batch 重复 nhead 次
+        # 结果顺序: [b0, b1, ..., b(bs-1), b0, b1, ..., b(bs-1), ...] (重复 nhead 次)
         if src_mask is not None and src_mask.ndim == 3 and src_mask.shape[0] == src.shape[1]:
             # [bs, num_q, num_k] -> [bs*nhead, num_q, num_k]
-            src_mask = src_mask.unsqueeze(1).repeat(1, self.nhead, 1, 1)
-            src_mask = src_mask.reshape(-1, src_mask.shape[2], src_mask.shape[3])
+            # 使用 tile 实现与 PyTorch repeat 相同的行为
+            src_mask = jt.concat([src_mask] * self.nhead, dim=0)
 
         q = k = self.with_pos_embed(src, pos)
         src2, _ = self.self_attn(q, k, src, attn_mask=src_mask)
@@ -380,7 +383,7 @@ class BiMultiHeadAttention(nn.Module):
 
     def _shape(self, tensor: jt.Var, seq_len: int, bsz: int):
         """重塑张量为多头格式"""
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def _reset_parameters(self):
         """初始化参数"""
@@ -530,8 +533,19 @@ class BiAttentionBlock(nn.Module):
         self.gamma_v = jt.Var(init_values * jt.ones((v_dim,), dtype=jt.float32))
         self.gamma_l = jt.Var(init_values * jt.ones((l_dim,), dtype=jt.float32))
         
-        # DropPath（这里简化为Identity）
-        self.drop_path = drop_path
+        # DropPath
+        self.drop_path_rate = drop_path
+
+    def _drop_path(self, x):
+        """DropPath implementation"""
+        if self.drop_path_rate == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_path_rate
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + jt.rand(shape, dtype=x.dtype)
+        random_tensor = jt.floor(random_tensor)
+        output = x / keep_prob * random_tensor
+        return output
 
     def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
         """
@@ -539,18 +553,20 @@ class BiAttentionBlock(nn.Module):
             v: 视觉特征 [bs, n_img, v_dim]
             l: 语言特征 [bs, n_text, l_dim]
         """
-        v_normed = self.layer_norm_v(v)
-        l_normed = self.layer_norm_l(l)
+        # Pre-LayerNorm (注意：PyTorch 版本直接覆盖 v, l)
+        v = self.layer_norm_v(v)
+        l = self.layer_norm_l(l)
         
         delta_v, delta_l = self.attn(
-            v_normed, l_normed, 
+            v, l, 
             attention_mask_v=attention_mask_v, 
             attention_mask_l=attention_mask_l
         )
         
-        # 残差连接 + LayerScale
-        v = v + self.gamma_v * delta_v
-        l = l + self.gamma_l * delta_l
+        # 残差连接 + LayerScale + DropPath
+        # 与 PyTorch 一致：残差连接使用归一化后的 v, l
+        v = v + self._drop_path(self.gamma_v * delta_v)
+        l = l + self._drop_path(self.gamma_l * delta_l)
         
         return v, l
 
@@ -707,28 +723,30 @@ class TransformerEncoder(nn.Module):
 
         # 主处理循环
         for layer_id, layer in enumerate(self.layers):
+            # DEBUG: Track memory_text distribution (disabled)
+            # if layer_id == 0:
+            #     print(f"DEBUG encoder layer {layer_id} input memory_text: min={memory_text.min().item():.3f}, max={memory_text.max().item():.3f}")
+            
             # 1. 特征融合
             if self.fusion_layers:
-                # output is [hw, bs, c], fusion needs [bs, hw, c]
-                output = output.transpose(0, 1)
+                # output is already [bs, hw, c], fusion also expects [bs, hw, c]
                 output, memory_text = self.fusion_layers[layer_id](
                     v=output,
                     l=memory_text,
                     attention_mask_v=key_padding_mask,
                     attention_mask_l=text_attention_mask,
                 )
-                output = output.transpose(0, 1)
+                # print(f"DEBUG encoder layer {layer_id} after fusion memory_text: min={memory_text.min().item():.3f}, max={memory_text.max().item():.3f}")
 
             # 2. 文本增强
             if self.text_layers:
-                print(f"Before text_layer {layer_id}: memory_text min={memory_text.min():.3f}, max={memory_text.max():.3f}")
                 memory_text = self.text_layers[layer_id](
                     src=memory_text.transpose(0, 1),
                     src_mask=jt.logical_not(text_self_attention_masks) if text_self_attention_masks is not None else None,
                     src_key_padding_mask=text_attention_mask,
                     pos=pos_text.transpose(0, 1) if pos_text is not None else None,
                 ).transpose(0, 1)
-                print(f"After text_layer {layer_id}: memory_text min={memory_text.min():.3f}, max={memory_text.max():.3f}")
+                # print(f"DEBUG encoder layer {layer_id} after text_layer memory_text: min={memory_text.min().item():.3f}, max={memory_text.max().item():.3f}")
 
             # 3. 视觉编码
             output = layer(

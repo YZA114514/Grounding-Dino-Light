@@ -86,3 +86,6 @@ subs/
 assistantdoc/
 
 GroundingDINO_Jittor/weights/
+
+GroundingDINO_Jittor/models/
+GroundingDINO_Jittor/jittor_implementation/__pycache__/

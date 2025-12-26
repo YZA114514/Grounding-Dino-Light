@@ -49,15 +49,17 @@ from .attention.ms_deform_attn import MSDeformAttn
 from .text_encoder import BERTWrapper
 
 
-class PositionEmbeddingSine(nn.Module):
+class PositionEmbeddingSineHW(nn.Module):
     """
     This is a more standard version of the position embedding, very similar to the one
     used by the Attention is all you need paper, generalized to work on images.
+    Uses separate temperatures for H and W dimensions (matching PyTorch implementation).
     """
-    def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
+    def __init__(self, num_pos_feats=64, temperatureH=10000, temperatureW=10000, normalize=False, scale=None):
         super().__init__()
         self.num_pos_feats = num_pos_feats
-        self.temperature = temperature
+        self.temperatureH = temperatureH
+        self.temperatureW = temperatureW
         self.normalize = normalize
         if scale is not None and normalize is False:
             raise ValueError("normalize should be True if scale is passed")
@@ -79,11 +81,14 @@ class PositionEmbeddingSine(nn.Module):
             y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
-        dim_t = jt.arange(self.num_pos_feats, dtype=jt.float32)
-        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+        # Use floor division like PyTorch: torch.div(dim_tx, 2, rounding_mode='floor')
+        dim_tx = jt.arange(self.num_pos_feats, dtype=jt.float32)
+        dim_tx = self.temperatureW ** (2 * (dim_tx // 2) / self.num_pos_feats)
+        pos_x = x_embed.unsqueeze(-1) / dim_tx
 
-        pos_x = x_embed.unsqueeze(-1) / dim_t
-        pos_y = y_embed.unsqueeze(-1) / dim_t
+        dim_ty = jt.arange(self.num_pos_feats, dtype=jt.float32)
+        dim_ty = self.temperatureH ** (2 * (dim_ty // 2) / self.num_pos_feats)
+        pos_y = y_embed.unsqueeze(-1) / dim_ty
         
         pos_x = jt.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
         pos_y = jt.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
@@ -135,6 +140,7 @@ class GroundingDINO(nn.Module):
         dec_pred_bbox_embed_share: bool = True,
         two_stage_class_embed_share: bool = True,
         two_stage_bbox_embed_share: bool = True,
+        embed_init_tgt: bool = True,  # Whether to use learnable tgt_embed in two-stage
         text_encoder_type: str = "bert-base-uncased",
         sub_sentence_present: bool = True,
         max_text_len: int = 256,
@@ -152,6 +158,7 @@ class GroundingDINO(nn.Module):
         self.aux_loss = aux_loss
         self.iter_update = iter_update
         self.two_stage_type = two_stage_type
+        self.embed_init_tgt = embed_init_tgt  # Store for use in forward
         
         assert query_dim == 4, "query_dim must be 4"
         
@@ -186,13 +193,15 @@ class GroundingDINO(nn.Module):
                     )
                 )
             # 额外的下采样层（如果需要更多层级）
+            in_channels = backbone_channels[-1]
             for _ in range(num_feature_levels - len(backbone_channels)):
                 input_proj_list.append(
                     nn.Sequential(
-                        nn.Conv2d(backbone_channels[-1], hidden_dim, kernel_size=3, stride=2, padding=1),
+                        nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
                         nn.GroupNorm(32, hidden_dim),
                     )
                 )
+                in_channels = hidden_dim  # 后续层输入是 hidden_dim
             self.input_proj = nn.ModuleList(input_proj_list)
         else:
             self.input_proj = nn.ModuleList([
@@ -209,9 +218,6 @@ class GroundingDINO(nn.Module):
         self.feat_map = nn.Linear(768, hidden_dim)  # BERT hidden size = 768
         nn.init.constant_(self.feat_map.bias, 0)
         nn.init.xavier_uniform_(self.feat_map.weight)
-        
-        # LayerNorm for text features after feat_map
-        self.text_feat_norm = nn.LayerNorm(hidden_dim)
         
         # 初始化 BERT 编码器
         self.text_encoder = BERTWrapper(
@@ -245,9 +251,11 @@ class GroundingDINO(nn.Module):
         else:
             self.level_embed = None
         
-        # Position Embedding
-        self.position_embedding = PositionEmbeddingSine(
+        # Position Embedding (use PositionEmbeddingSineHW with temperature=20 like PyTorch)
+        self.position_embedding = PositionEmbeddingSineHW(
             num_pos_feats=hidden_dim // 2,
+            temperatureH=20,
+            temperatureW=20,
             normalize=True
         )
         
@@ -341,7 +349,7 @@ class GroundingDINO(nn.Module):
                 )
                 text_enhance_layer = TransformerEncoderLayer(
                     d_model=d_model,
-                    nhead=nhead,
+                    nhead=nhead // 2,  # Fixed: nhead -> nhead // 2 to match PyTorch
                     dim_feedforward=1024, # Fixed: 2048 -> 1024
                     dropout=dropout,
                 )
@@ -351,6 +359,7 @@ class GroundingDINO(nn.Module):
                     embed_dim=1024, # Fixed: d_model (256) -> 1024
                     num_heads=nhead,
                     dropout=dropout,
+                    drop_path=0.1,  # Match PyTorch fusion_droppath
                 )
                 
                 self_inner.encoder = TransformerEncoder(
@@ -421,11 +430,7 @@ class GroundingDINO(nn.Module):
         text_dict = self.text_encoder(captions, sub_sentence_present=self.sub_sentence_present)
         
         # DEBUG: Check shape after text_encoder
-        print(f"After text_encoder: encoded_text shape={text_dict['encoded_text'].shape}, hidden_dim={self.hidden_dim}")
-        
-        # Apply LayerNorm to text features
-        text_dict["encoded_text"] = self.text_feat_norm(text_dict["encoded_text"])
-        print(f"After text_feat_norm: min={text_dict['encoded_text'].min().item():.4f}, max={text_dict['encoded_text'].max().item():.4f}")
+        # print(f"After text_encoder: encoded_text shape={text_dict['encoded_text'].shape}, hidden_dim={self.hidden_dim}")
         
         return text_dict
     
@@ -472,10 +477,12 @@ class GroundingDINO(nn.Module):
             
         output_proposals = jt.concat(proposals, dim=1)
         
-        # Debug before inverse sigmoid
-        # print(f"proposals before inv_sigmoid min: {output_proposals.min().item()}, max: {output_proposals.max().item()}")
+        # DEBUG: proposals before inverse sigmoid
+        # print(f"proposals before inv_sigmoid: shape={output_proposals.shape}")
 
-        output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(-1)
+        # 使用 keepdims=True 以匹配 PyTorch 实现 (keepdim=True)
+        # Jittor 的 all() 不支持 keepdims，手动添加维度
+        output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(-1).unsqueeze(-1)
         
         # Clamp to avoid log errors
         output_proposals = jt.clamp(output_proposals, 1e-4, 1-1e-4)
@@ -486,11 +493,13 @@ class GroundingDINO(nn.Module):
         # print(f"proposals after inv_sigmoid min: {output_proposals.min().item()}, max: {output_proposals.max().item()}")
 
         output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float('inf'))
-        output_proposals = output_proposals.masked_fill(jt.logical_not(output_proposals_valid.unsqueeze(-1)), float('inf'))
-
+        # output_proposals_valid 已经是 [bs, n_tokens, 1]，需要 squeeze 以匹配 PyTorch 的 keepdim=True 行为
+        output_proposals_valid_squeezed = output_proposals_valid.squeeze(-1) if output_proposals_valid.ndim == 3 else output_proposals_valid
+        output_proposals = output_proposals.masked_fill(jt.logical_not(output_proposals_valid_squeezed).unsqueeze(-1), float('inf'))
+        
         output_memory = memory
         output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), 0.0)
-        output_memory = output_memory.masked_fill(jt.logical_not(output_proposals_valid.unsqueeze(-1)), 0.0)
+        output_memory = output_memory.masked_fill(jt.logical_not(output_proposals_valid_squeezed).unsqueeze(-1), 0.0)
 
         return output_memory, output_proposals, output_proposals_valid
 
@@ -555,12 +564,12 @@ class GroundingDINO(nn.Module):
             }
         
         # 确保文本特征维度正确
-        print(f"Before dimension check: encoded_text shape={text_dict['encoded_text'].shape}, hidden_dim={self.hidden_dim}")
+        # print(f"Before dimension check: encoded_text shape={text_dict['encoded_text'].shape}, hidden_dim={self.hidden_dim}")
         if text_dict["encoded_text"].shape[-1] != self.hidden_dim:
-            print(f"Applying feat_map because {text_dict['encoded_text'].shape[-1]} != {self.hidden_dim}")
+            # print(f"Applying feat_map because {text_dict['encoded_text'].shape[-1]} != {self.hidden_dim}")
             text_dict["encoded_text"] = self.feat_map(text_dict["encoded_text"])
         else:
-            print(f"No feat_map applied, shape is correct")
+            pass  # feat_map not needed, shape is correct
         
         # ============================================================
         # 3. 提取视觉特征
@@ -722,17 +731,17 @@ class GroundingDINO(nn.Module):
         # ============================================================
         # 5. Encoder
         # ============================================================
-        print("Entering Encoder...")
-        print(f"src_flatten dtype: {src_flatten.dtype}")
-        print(f"src_flatten stats: min={src_flatten.min().item()}, max={src_flatten.max().item()}, mean={src_flatten.mean().item()}")
+        # print("Entering Encoder...")
+        # print(f"src_flatten dtype: {src_flatten.dtype}")
+        # print(f"src_flatten stats: min={src_flatten.min().item()}, max={src_flatten.max().item()}, mean={src_flatten.mean().item()}")
         # if jt.any(jt.isnan(src_flatten)) or jt.any(jt.isinf(src_flatten)):
         #     print("WARNING: src_flatten contains NaN or Inf!")
         
-        print(f"lvl_pos_embed_flatten dtype: {lvl_pos_embed_flatten.dtype}")
-        print(f"spatial_shapes dtype: {spatial_shapes.dtype}")
-        print(f"valid_ratios dtype: {valid_ratios.dtype}")
-        print(f"valid_ratios values:\n{valid_ratios.numpy()}")
-        print(f"Input memory_text stats: min={float(text_dict['encoded_text'].min())}, max={float(text_dict['encoded_text'].max())}")
+        # print(f"lvl_pos_embed_flatten dtype: {lvl_pos_embed_flatten.dtype}")
+        # print(f"spatial_shapes dtype: {spatial_shapes.dtype}")
+        # print(f"valid_ratios dtype: {valid_ratios.dtype}")
+        # print(f"valid_ratios values:\n{valid_ratios.numpy()}")
+        # print(f"Input memory_text stats: min={float(text_dict['encoded_text'].min())}, max={float(text_dict['encoded_text'].max())}")
 
         # Ensure all inputs are float32
         src_flatten = src_flatten.float32()
@@ -740,19 +749,28 @@ class GroundingDINO(nn.Module):
         valid_ratios = valid_ratios.float32()
         text_dict["encoded_text"] = text_dict["encoded_text"].float32()
 
+        # Note: encoder expects [bs, sum(hw), c] format (NOT transposed)
+        # PyTorch: text_attention_mask=~text_dict["text_token_mask"]
+        # We need to invert the mask: True means pad (ignore), False means valid
         memory, memory_text = self.transformer.encoder(
-            src=src_flatten.transpose(0, 1),
-            pos=lvl_pos_embed_flatten.transpose(0, 1),
+            src=src_flatten,  # [bs, sum(hw), c]
+            pos=lvl_pos_embed_flatten,  # [bs, sum(hw), c]
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
             key_padding_mask=mask_flatten,
             memory_text=text_dict["encoded_text"],
-            text_attention_mask=text_dict["text_token_mask"],
+            text_attention_mask=jt.logical_not(text_dict["text_token_mask"]),  # Invert mask like PyTorch
             position_ids=text_dict["position_ids"],
             text_self_attention_masks=text_dict["text_self_attention_masks"],
         )
-        print("Encoder finished.")
+        # print("Encoder finished.")
+        
+        # CRITICAL: Update text_dict with encoder-enhanced text features
+        # This is done in PyTorch's Transformer.forward (line 279)
+        # print(f"DEBUG before update: encoded_text min={text_dict['encoded_text'].min().item():.3f}, max={text_dict['encoded_text'].max().item():.3f}")
+        # print(f"DEBUG memory_text: min={memory_text.min().item():.3f}, max={memory_text.max().item():.3f}")
+        text_dict["encoded_text"] = memory_text
         
         # ============================================================
         # 6. Decoder
@@ -767,36 +785,26 @@ class GroundingDINO(nn.Module):
         
         # Two-stage selection
         if self.two_stage_type != 'no':
-            # memory: [bs, n_tokens, d_model] (transposed from [n_tokens, bs, d_model])
-            # Note: memory returned from encoder is [n_tokens, bs, d_model]
-            output_memory = memory.transpose(0, 1) # [bs, n_tokens, d_model]
-            
-            # Generate proposals
-            # Modified to return masked output_memory to match PyTorch
+            # memory is already [bs, n_tokens, d_model] from encoder
+            output_memory = memory
             output_memory, output_proposals, proposals_valid = self.gen_encoder_output_proposals(output_memory, mask_flatten, spatial_shapes)
-
+            
             if self.two_stage_type == 'standard':
                 output_memory = self.enc_output(output_memory)
                 output_memory = self.enc_output_norm(output_memory)
             
-            print(f"output_proposals stats: min={output_proposals.min().item()}, max={output_proposals.max().item()}, mean={output_proposals.mean().item()}")
-            
-            # Predict class and box
             enc_outputs_class = self.transformer.enc_out_class_embed(output_memory, text_dict)
             enc_outputs_coord_unact = self.transformer.enc_out_bbox_embed(output_memory) + output_proposals
-            
-            print(f"enc_outputs_coord_unact stats: min={enc_outputs_coord_unact.min().item()}, max={enc_outputs_coord_unact.max().item()}")
 
             # Select top-k
             topk = self.num_queries
-            # enc_outputs_class: [bs, n_tokens, max_text_len]
-            class_prob = enc_outputs_class.max(-1)[0] # [bs, n_tokens]
+            class_prob = enc_outputs_class.max(-1)[0]  # [bs, n_tokens]
 
             # Mask invalid proposals
-            final_mask = mask_flatten | jt.logical_not(proposals_valid)
+            # proposals_valid is [bs, n_tokens, 1] from keepdims, squeeze to [bs, n_tokens]
+            proposals_valid_squeezed = proposals_valid.squeeze(-1) if len(proposals_valid.shape) == 3 else proposals_valid
+            final_mask = mask_flatten | jt.logical_not(proposals_valid_squeezed)
             class_prob = class_prob.masked_fill(final_mask, -1e9)
-            
-            print(f"class_prob stats: min={class_prob.min().item()}, max={class_prob.max().item()}, mean={class_prob.mean().item()}")
 
             # Ensure class_prob is [bs, n_tokens]
             # If batch dimension was squeezed, restore it
@@ -808,7 +816,6 @@ class GroundingDINO(nn.Module):
             _, sorted_indices = jt.sort(class_prob, dim=1, descending=True)
             
             topk_proposals = sorted_indices[:, :topk] # [bs, topk]
-            print(f"topk_proposals (indices): {topk_proposals[0, :10].numpy()}")
             
             # Gather
             # output_memory: [bs, n_tokens, d_model]
@@ -818,8 +825,15 @@ class GroundingDINO(nn.Module):
             # Jittor gather implementation
             # index: [bs, topk, d_model]
             idx = topk_proposals.unsqueeze(-1).repeat(1, 1, self.hidden_dim)
-            tgt = jt.gather(output_memory, 1, idx) # [bs, topk, d_model]
-            tgt = tgt.transpose(0, 1) # [topk, bs, d_model] (Decoder expects [nq, bs, d_model])
+            tgt_gathered = jt.gather(output_memory, 1, idx)  # [bs, topk, d_model]
+            
+            # CRITICAL: Use tgt_embed.weight if embed_init_tgt is True (like PyTorch)
+            if self.embed_init_tgt:
+                # Use learnable tgt_embed instead of gathered output_memory
+                tgt = self.tgt_embed.weight.unsqueeze(1).repeat(1, bs, 1)  # [nq, bs, hidden_dim]
+            else:
+                # Use gathered output_memory
+                tgt = tgt_gathered.transpose(0, 1).detach()  # [topk, bs, d_model]
             
             # Gather refpoint
             # enc_outputs_coord_unact: [bs, n_tokens, 4]
@@ -828,8 +842,8 @@ class GroundingDINO(nn.Module):
             # enc_outputs_coord_unact = jt.clamp(enc_outputs_coord_unact, -10, 10)
             idx_coord = topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
             refpoint_unact = jt.gather(enc_outputs_coord_unact, 1, idx_coord) # [bs, topk, 4]
-            print(f"refpoint_unact gathered stats: min={refpoint_unact.min().item()}, max={refpoint_unact.max().item()}")
-            print(f"refpoint_unact gathered first 5: {refpoint_unact[0, :5].numpy()}")
+            # print(f"refpoint_unact gathered stats: min={refpoint_unact.min().item()}, max={refpoint_unact.max().item()}")
+            # print(f"refpoint_unact gathered first 5: {refpoint_unact[0, :5].numpy()}")
             
             # refpoint = jt.sigmoid(refpoint_unact) # [bs, topk, 4]
             # print(f"refpoint sigmoid stats: min={refpoint.min().item()}, max={refpoint.max().item()}")
@@ -837,66 +851,75 @@ class GroundingDINO(nn.Module):
             # refpoint = refpoint.transpose(0, 1) # [topk, bs, 4]
             
             # Pass raw logits to decoder (it expects unsigmoid)
-            refpoint = refpoint_unact.transpose(0, 1) # [topk, bs, 4]
+            refpoint = refpoint_unact.transpose(0, 1)  # [topk, bs, 4]
 
             # Detach
             tgt = tgt.detach()
             refpoint = refpoint.detach()
 
-        print("Entering Decoder...")
-        print(f"memory_text shape: {memory_text.shape}")
-        print(f"text_attention_mask shape: {text_dict['text_token_mask'].shape}")
+        # print("Entering Decoder...")
+        # print(f"memory_text shape: {memory_text.shape}")
+        # print(f"text_attention_mask shape: {text_dict['text_token_mask'].shape}")
 
         # Decoder forward
+        # Note: decoder expects memory in [hw, bs, c] format, but encoder returns [bs, hw, c]
+        # PyTorch: text_attention_mask=~text_dict["text_token_mask"]
         hs, references = self.transformer.decoder(
             tgt=tgt,
-            memory=memory,
+            memory=memory.transpose(0, 1),  # [bs, hw, c] -> [hw, bs, c]
             memory_key_padding_mask=mask_flatten,
-            pos=lvl_pos_embed_flatten.transpose(0, 1),
+            pos=lvl_pos_embed_flatten.transpose(0, 1),  # [bs, hw, c] -> [hw, bs, c]
             refpoints_unsigmoid=refpoint,
             level_start_index=level_start_index,
             spatial_shapes=spatial_shapes,
             valid_ratios=valid_ratios,
             memory_text=memory_text,
-            text_attention_mask=text_dict["text_token_mask"],
+            text_attention_mask=jt.logical_not(text_dict["text_token_mask"]),  # Invert mask like PyTorch
         )
-        print("Decoder finished.")
+        # print("Decoder finished.")
         
         # DEBUG
-        print(f"hs type: {type(hs)}")
-        print(f"hs len: {len(hs)}")
-        print(f"hs[-1] shape: {hs[-1].shape}")
-        print(f"references type: {type(references)}")
-        print(f"references len: {len(references)}")
-        print(f"references[-1] shape: {references[-1].shape}")
+        # print(f"hs type: {type(hs)}")
+        # print(f"hs len: {len(hs)}")
+        # print(f"hs[-1] shape: {hs[-1].shape}")
+        # print(f"references type: {type(references)}")
+        # print(f"references len: {len(references)}")
+        # print(f"references[-1] shape: {references[-1].shape}")
 
-        # Check reference points evolution across decoder layers
-        for i, ref in enumerate(references):
-            print(f"Layer {i} ref points range: {ref.min().item():.3f} - {ref.max().item():.3f}")
-        
         # ============================================================
         # 7. 检测头输出
         # ============================================================
-        # 注意：在标准 DETR 中，边界框预测是在解码器中通过迭代更新参考点完成的
-        # 最终的参考点就是预测的边界框，无需再次应用 bbox_embed
+        # 与 PyTorch 一致：在主模型中重新计算边界框输出
+        # 使用 norm 后的 hs 和 reference[:-1] (不包括最后一个参考点)
         
+        # deformable-detr-like anchor update
+        # 重新计算边界框输出，使用 norm 后的 hs
+        outputs_coord_list = []
+        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
+            zip(references[:-1], self.bbox_embed, hs)
+        ):
+            layer_delta_unsig = layer_bbox_embed(layer_hs)
+            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
+            layer_outputs_unsig = jt.sigmoid(layer_outputs_unsig)
+            outputs_coord_list.append(layer_outputs_unsig)
+        outputs_coord_list = jt.stack(outputs_coord_list)
+        
+        # 分类输出 - 使用所有层的 hs (与 PyTorch 一致)
         outputs_class = jt.stack([
             layer_cls_embed(layer_hs, text_dict)
-            for layer_cls_embed, layer_hs in zip(self.class_embed, hs[:-1])
+            for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
         ])
         
-        # 最终输出：使用解码器更新的参考点作为边界框预测
-        out = {
-            "pred_logits": outputs_class[-1],  # [bs, num_queries, max_text_len]
-            "pred_boxes": references[-1],       # [bs, num_queries, 4] - 最终参考点即为预测框
-        }
+        # DEBUG: Check logits distribution
+        # print(f"DEBUG outputs_class: min={outputs_class.min().item():.3f}, max={outputs_class.max().item():.3f}")
+        # print(f"DEBUG text_dict encoded_text: min={text_dict['encoded_text'].min().item():.3f}, max={text_dict['encoded_text'].max().item():.3f}")
+        # print(f"DEBUG hs[-1]: min={hs[-1].min().item():.3f}, max={hs[-1].max().item():.3f}")
+        # print(f"DEBUG text_token_mask: shape={text_dict['text_token_mask'].shape}, sum={text_dict['text_token_mask'].sum().item()}")
         
-        # 辅助输出：使用中间层的结果
-        if self.aux_loss:
-            out["aux_outputs"] = [
-                {"pred_logits": a, "pred_boxes": b}
-                for a, b in zip(outputs_class[:-1], references[1:-1])  # references[1] 是第0层后的参考点
-            ]
+        out = {
+            "pred_logits": outputs_class[-1],
+            "pred_boxes": outputs_coord_list[-1],
+        }
         
         return out
 
