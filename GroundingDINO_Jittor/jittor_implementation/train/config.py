@@ -135,7 +135,7 @@ class TrainingConfig:
         self.focal_alpha = 0.25
         
         # Dataset parameters
-        self.num_classes = 1203  # LVIS
+        self.num_classes = 2001  # LVIS
         self.masks = False
         self.aux_loss = True
         

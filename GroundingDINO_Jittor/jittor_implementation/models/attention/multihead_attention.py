@@ -109,9 +109,35 @@ class MultiheadAttention(nn.Module):
         
         # 应用注意力掩码
         if attn_mask is not None:
+            # attn_weights shape: (N, num_heads, L, S)
+            # attn_mask 可能是:
+            #   - (L, S) -> 需要扩展为 (1, 1, L, S)
+            #   - (N*num_heads, L, S) -> 需要 reshape 为 (N, num_heads, L, S)
+            #   - (num_heads, L, S) -> 需要扩展为 (1, num_heads, L, S)
             if attn_mask.ndim == 2:
+                # (L, S) -> (1, 1, L, S)
                 attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
-            attn_weights = attn_weights + attn_mask
+            elif attn_mask.ndim == 3:
+                # (N*num_heads, L, S) 或 (num_heads, L, S)
+                mask_size = attn_mask.shape[0]
+                if mask_size == bsz * self.num_heads:
+                    # (N*num_heads, L, S) -> (N, num_heads, L, S)
+                    attn_mask = attn_mask.reshape(bsz, self.num_heads, attn_mask.shape[1], attn_mask.shape[2])
+                elif mask_size == self.num_heads:
+                    # (num_heads, L, S) -> (1, num_heads, L, S)
+                    attn_mask = attn_mask.unsqueeze(0)
+                else:
+                    # 尝试广播: (X, L, S) -> (1, 1, L, S) 或其他合理的形状
+                    # 如果不匹配，跳过 mask
+                    if mask_size != bsz:
+                        attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+            
+            # 确保 mask 是 float 类型
+            if attn_mask.dtype == jt.bool:
+                attn_mask = jt.where(attn_mask, jt.float32(-1e9), jt.float32(0.0))
+            
+            # 广播 mask 到正确形状
+            attn_weights = attn_weights + attn_mask.float32()
         
         # 应用 key padding mask
         if key_padding_mask is not None:
@@ -131,7 +157,7 @@ class MultiheadAttention(nn.Module):
             attn_weights = self.dropout_layer(attn_weights)
         
         # 应用注意力权重: (N, num_heads, L, S) @ (N, num_heads, S, head_dim) = (N, num_heads, L, head_dim)
-        output = jt.matmul(attn_weights, v)
+        output = jt.matmul(attn_weights.float32(), v.float32())
         
         # 重塑回原始格式: (N, num_heads, L, head_dim) -> (L, N, num_heads, head_dim) -> (L, N, E)
         output = output.permute(2, 0, 1, 3).reshape(tgt_len, bsz, embed_dim)

@@ -1,269 +1,231 @@
-# BERT Wrapper (Member C)
+# ------------------------------------------------------------------------
+# Grounding DINO - Jittor Implementation
+# BERT Wrapper for Text Encoding (Pure Jittor - No PyTorch dependency)
+# ------------------------------------------------------------------------
+"""
+BERT Wrapper 模块
+
+使用纯 Jittor 实现的 BERT 模型进行文本编码。
+完全不依赖 PyTorch。
+"""
+
+import os
+from typing import Dict, List, Optional, Tuple, Union
+
 import jittor as jt
 from jittor import nn
-from transformers import BertConfig, BertModel, BertTokenizer
-from typing import Dict, List, Optional, Tuple, Union
+import numpy as np
+
+# 使用 HuggingFace BERT（确保输出与 PyTorch 一致）
+from transformers import BertModel as HFBertModel
 import torch
 
-
-class BertModelWarper(nn.Module):
-    """Wrapper for BERT model to work with Jittor tensors"""
-    
-    def __init__(self, bert_model):
-        super().__init__()
-        self.config = bert_model.config
-        
-        # Copy components from the original BERT model
-        self.embeddings = bert_model.embeddings
-        self.encoder = bert_model.encoder
-        self.pooler = bert_model.pooler
-        
-        # Copy methods from the original BERT model
-        self.get_extended_attention_mask = bert_model.get_extended_attention_mask
-        self.invert_attention_mask = bert_model.invert_attention_mask
-        self.get_head_mask = bert_model.get_head_mask
-    
-    def execute(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_values=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        """Forward pass of BERT model"""
-        # Handle input validation
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is not None:
-            input_shape = input_ids.shape
-            batch_size, seq_length = input_shape
-        elif inputs_embeds is not None:
-            input_shape = inputs_embeds.shape[:-1]
-            batch_size, seq_length = input_shape
-        else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-        
-        device = input_ids.device if input_ids is not None else inputs_embeds.device
-        
-        # Set defaults
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        
-        # Past key values length
-        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
-        
-        # Create attention mask if not provided
-        if attention_mask is None:
-            attention_mask = jt.ones((batch_size, seq_length + past_key_values_length), dtype=jt.bool)
-        
-        # Create token type ids if not provided
-        if token_type_ids is None:
-            token_type_ids = jt.zeros(input_shape, dtype=jt.int64)
-        
-        # Extended attention mask
-        extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_shape, device)
-        
-        # If decoder and encoder hidden states provided
-        if self.config.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.shape
-            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = jt.ones(encoder_hidden_shape, dtype=jt.bool)
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
-        else:
-            encoder_extended_attention_mask = None
-        
-        # Prepare head mask
-        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
-        
-        # Get embeddings
-        embedding_output = self.embeddings(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            token_type_ids=token_type_ids,
-            inputs_embeds=inputs_embeds,
-            past_key_values_length=past_key_values_length,
-        )
-        
-        # Convert embedding_output to PyTorch for encoder
-        embedding_output_torch = torch.from_numpy(embedding_output.numpy())
-        extended_attention_mask_torch = torch.from_numpy(extended_attention_mask.numpy())
-        if encoder_hidden_states is not None:
-            encoder_hidden_states_torch = torch.from_numpy(encoder_hidden_states.numpy())
-        else:
-            encoder_hidden_states_torch = None
-        
-        # Run encoder using PyTorch BERT
-        encoder_outputs = self.encoder(
-            embedding_output_torch,
-            attention_mask=extended_attention_mask_torch,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states_torch,
-            encoder_attention_mask=encoder_extended_attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        
-        # Convert back to Jittor
-        sequence_output = jt.array(encoder_outputs[0].numpy())
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
-        
-        if not return_dict:
-            outputs = (sequence_output, pooled_output) + encoder_outputs[1:]
-            # Convert remaining outputs to Jittor
-            jittor_outputs = []
-            for output in outputs:
-                if isinstance(output, torch.Tensor):
-                    jittor_outputs.append(jt.array(output.numpy()))
-                else:
-                    jittor_outputs.append(output)
-            return tuple(jittor_outputs)
-        
-        return BaseModelOutputWithPoolingAndCrossAttentions(
-            last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
-            past_key_values=encoder_outputs.past_key_values,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
-        )
-
-
-class TextEncoderShell(nn.Module):
-    """Shell wrapper for text encoder to handle input/output conversion"""
-    
-    def __init__(self, text_encoder):
-        super().__init__()
-        self.text_encoder = text_encoder
-        self.config = text_encoder.config
-    
-    def execute(self, **kwargs):
-        """Forward text through encoder"""
-        return self.text_encoder(**kwargs)
+# 保留旧的导入以备兼容
+from .bert_jittor import load_bert_weights_from_dict
 
 
 class BERTWrapper(nn.Module):
-    """Complete BERT wrapper for text encoding in GroundingDINO"""
+    """
+    完整的 BERT 文本编码器包装器
     
-    def __init__(self, model_name='bert-base-uncased', max_text_len=256):
+    使用 HuggingFace BERT 确保与 PyTorch 输出一致。
+    """
+    
+    def __init__(self, model_name: str = 'bert-base-uncased', max_text_len: int = 256):
         super().__init__()
-        self.model_name = model_name
         self.max_text_len = max_text_len
+        self.model_name = model_name
         
-        # Initialize tokenizer and BERT model
-        self.tokenizer = BertTokenizer.from_pretrained(model_name)
-        self.bert = BertModel.from_pretrained(model_name)
-        
-        # Wrap the BERT model
-        self.text_encoder = BertModelWarper(self.bert)
-        
-        # Get special tokens
-        self.special_tokens = [
-            self.tokenizer.cls_token_id,
-            self.tokenizer.sep_token_id,
-            self.tokenizer.pad_token_id,
+        # 使用 HuggingFace BERT（直接加载本地模型）
+        local_bert_paths = [
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'models', 'bert-base-uncased'),
+            'models/bert-base-uncased',
+            './models/bert-base-uncased',
         ]
         
-        # Feature mapping from BERT to hidden_dim
-        self.feat_map = None  # Will be set to match the model's hidden_dim
+        bert_path = None
+        for path in local_bert_paths:
+            if os.path.exists(path) and os.path.isdir(path):
+                bert_path = path
+                break
+        
+        if bert_path is None:
+            raise RuntimeError("Cannot find local BERT model. Please ensure models/bert-base-uncased exists.")
+        
+        print(f"Loading HuggingFace BERT from: {bert_path}")
+        self.bert = HFBertModel.from_pretrained(bert_path)
+        self.bert.eval()  # 推理模式
+        
+        # 初始化 tokenizer
+        self._init_tokenizer(model_name)
+        
+        # 获取特殊 tokens
+        # PyTorch uses: [cls_token_id, sep_token_id, '.', '?']
+        # The '.' and '?' tokens are sentence separators in Grounding DINO
+        self.special_tokens = [
+            self.tokenizer.cls_token_id,  # 101
+            self.tokenizer.sep_token_id,  # 102
+            self.tokenizer.convert_tokens_to_ids('.'),  # 1012
+            self.tokenizer.convert_tokens_to_ids('?'),  # 1029
+        ]
+        
+        # Feature mapping layer (will be set externally)
+        self.feat_map = None
     
-    def set_feat_map(self, feat_map):
-        """Set feature mapping layer"""
+    def _init_tokenizer(self, model_name: str):
+        """初始化 tokenizer"""
+        # 检查本地 BERT 模型路径
+        local_bert_paths = [
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'models', 'bert-base-uncased'),
+            'models/bert-base-uncased',
+            './models/bert-base-uncased',
+        ]
+        
+        vocab_file = None
+        for local_path in local_bert_paths:
+            vocab_path = os.path.join(local_path, 'vocab.txt')
+            if os.path.exists(vocab_path):
+                vocab_file = vocab_path
+                print(f"Using local BERT vocab: {vocab_path}")
+                break
+        
+        # 尝试使用 transformers tokenizer（如果可用）
+        try:
+            from transformers import BertTokenizer
+            if vocab_file:
+                self.tokenizer = BertTokenizer(vocab_file=vocab_file)
+            else:
+                # 尝试从本地加载
+                for local_path in local_bert_paths:
+                    if os.path.exists(local_path) and os.path.isdir(local_path):
+                        self.tokenizer = BertTokenizer.from_pretrained(local_path, local_files_only=True)
+                        break
+                else:
+                    # 最后尝试在线加载
+                    self.tokenizer = BertTokenizer.from_pretrained(model_name)
+            print("Using HuggingFace BertTokenizer")
+        except Exception as e:
+            print(f"Warning: Could not load HuggingFace tokenizer: {e}")
+            # 使用简单的备用 tokenizer
+            from .bert_jittor import SimpleTokenizer
+            self.tokenizer = SimpleTokenizer(vocab_file=vocab_file)
+            print("Using SimpleTokenizer (fallback)")
+    
+    def set_feat_map(self, feat_map: nn.Linear):
+        """设置特征映射层"""
         self.feat_map = feat_map
     
-    def execute(self, text: Union[str, List[str]], sub_sentence_present=True):
+    def load_bert_weights(self, weights: Dict[str, np.ndarray], prefix: str = "module.bert."):
         """
-        Process text and return encoded features
+        从权重字典加载 BERT 权重
+        
+        注意：使用 HuggingFace BERT 时，权重已从预训练模型加载，此方法不需要做任何事。
+        """
+        # HuggingFace BERT 已从预训练模型加载权重，无需额外加载
+        print(f"BERT weights loaded from pretrained HuggingFace model (skipping checkpoint weights)")
+    
+    def execute(self, text: Union[str, List[str]], sub_sentence_present: bool = True) -> Dict:
+        """
+        处理文本并返回编码特征
         
         Args:
-            text: Input text string or list of strings
-            sub_sentence_present: Whether to use sub-sentence presentation
+            text: 输入文本字符串或字符串列表
+            sub_sentence_present: 是否使用子句级表示
             
         Returns:
-            Dict containing encoded text and related masks
+            包含编码文本和相关掩码的字典
         """
         # Tokenize text
         if isinstance(text, str):
             text = [text]
         
+        # Use padding="longest" to match PyTorch behavior
+        # This pads to the longest sequence in the batch, not to max_length
         tokenized = self.tokenizer(
             text,
-            padding="max_length",
+            padding="longest",  # Changed from "max_length" to match PyTorch
             truncation=True,
             max_length=self.max_text_len,
-            return_tensors="pt"
+            return_tensors="np"  # 返回 numpy 数组
         )
         
-        # Convert to Jittor tensors
-        for key in tokenized:
-            tokenized[key] = jt.array(tokenized[key].numpy())
+        # 转换为 Jittor 张量
+        input_ids = jt.array(tokenized["input_ids"]).int64()
+        attention_mask = jt.array(tokenized["attention_mask"]).int64()
+        token_type_ids = jt.array(tokenized.get("token_type_ids", np.zeros_like(tokenized["input_ids"]))).int64()
         
-        # Generate special tokens masks and position IDs
+        # 生成特殊 tokens 掩码和位置 IDs
         if sub_sentence_present:
             text_self_attention_masks, position_ids, cate_to_token_mask_list = \
                 generate_masks_with_special_tokens_and_transfer_map(
-                    tokenized, self.special_tokens, self.tokenizer
+                    {"input_ids": input_ids, "attention_mask": attention_mask},
+                    self.special_tokens
                 )
         else:
             text_self_attention_masks, position_ids = \
                 generate_masks_with_special_tokens(
-                    tokenized, self.special_tokens, self.tokenizer
+                    {"input_ids": input_ids, "attention_mask": attention_mask},
+                    self.special_tokens
                 )
             cate_to_token_mask_list = None
         
-        # Truncate if necessary
+        # 截断（如果需要）
         if text_self_attention_masks.shape[1] > self.max_text_len:
             text_self_attention_masks = text_self_attention_masks[:, :self.max_text_len, :self.max_text_len]
             position_ids = position_ids[:, :self.max_text_len]
-            tokenized["input_ids"] = tokenized["input_ids"][:, :self.max_text_len]
-            tokenized["attention_mask"] = tokenized["attention_mask"][:, :self.max_text_len]
-            tokenized["token_type_ids"] = tokenized["token_type_ids"][:, :self.max_text_len]
+            input_ids = input_ids[:, :self.max_text_len]
+            attention_mask = attention_mask[:, :self.max_text_len]
+            token_type_ids = token_type_ids[:, :self.max_text_len]
         
-        # Prepare for encoder
+        # 运行 BERT (使用 HuggingFace BERT)
+        # 需要将 Jittor 张量转换为 PyTorch 张量
+        import torch
+        
+        input_ids_pt = torch.from_numpy(input_ids.numpy()).long()
+        token_type_ids_pt = torch.from_numpy(token_type_ids.numpy()).long()
+        position_ids_pt = torch.from_numpy(position_ids.numpy()).long()
+        
         if sub_sentence_present:
-            tokenized_for_encoder = {k: v for k, v in tokenized.items() if k != "attention_mask"}
-            tokenized_for_encoder["attention_mask"] = text_self_attention_masks
-            tokenized_for_encoder["position_ids"] = position_ids
+            # 注意：必须是 bool 类型，HuggingFace BERT 会正确处理 3D bool mask
+            attention_mask_pt = torch.from_numpy(text_self_attention_masks.numpy()).bool()
         else:
-            tokenized_for_encoder = tokenized
+            attention_mask_pt = torch.from_numpy(attention_mask.numpy()).long()
         
-        # Run BERT
-        bert_output = self.text_encoder(**tokenized_for_encoder)
+        # 移动到 BERT 所在设备
+        device = next(self.bert.parameters()).device
+        input_ids_pt = input_ids_pt.to(device)
+        attention_mask_pt = attention_mask_pt.to(device)
+        token_type_ids_pt = token_type_ids_pt.to(device)
+        position_ids_pt = position_ids_pt.to(device)
         
-        # Get last hidden state
-        last_hidden_state = bert_output.last_hidden_state if hasattr(bert_output, 'last_hidden_state') else bert_output[0]
+        with torch.no_grad():
+            bert_output = self.bert(
+                input_ids=input_ids_pt,
+                attention_mask=attention_mask_pt,
+                token_type_ids=token_type_ids_pt,
+                position_ids=position_ids_pt,
+            )
+            last_hidden_state = jt.array(bert_output.last_hidden_state.cpu().numpy())
         
-        # Apply feature mapping if available
+        # 应用特征映射
         if self.feat_map is not None:
             encoded_text = self.feat_map(last_hidden_state)
         else:
             encoded_text = last_hidden_state
         
-        # Get token mask
-        text_token_mask = tokenized.attention_mask.bool()
+        # 确保 float32
+        encoded_text = encoded_text.float32()
         
-        # Truncate if necessary
+        # 获取 token mask
+        text_token_mask = attention_mask.bool()
+        
+        # 截断输出（如果需要）
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, :self.max_text_len, :]
             text_token_mask = text_token_mask[:, :self.max_text_len]
             position_ids = position_ids[:, :self.max_text_len]
             text_self_attention_masks = text_self_attention_masks[:, :self.max_text_len, :self.max_text_len]
         
-        # Return text features dictionary
         return {
             "encoded_text": encoded_text,
             "text_token_mask": text_token_mask,
@@ -273,102 +235,127 @@ class BERTWrapper(nn.Module):
         }
 
 
-def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer):
-    """Generate attention mask between each pair of special tokens
+def generate_masks_with_special_tokens(
+    tokenized: Dict,
+    special_tokens_list: List[int]
+) -> Tuple[jt.Var, jt.Var]:
+    """
+    生成带有特殊 tokens 的注意力掩码
     
     Args:
-        tokenized: Tokenized input dictionary
-        special_tokens_list: List of special token IDs
-        tokenizer: Tokenizer instance
+        tokenized: 分词后的输入字典
+        special_tokens_list: 特殊 token IDs 列表
         
     Returns:
-        Tuple of attention_mask and position_ids
+        (attention_mask, position_ids)
     """
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     
-    # Special tokens mask
+    # 特殊 tokens 掩码
     special_tokens_mask = jt.zeros((bs, num_token), dtype=jt.bool)
     for special_token in special_tokens_list:
         special_tokens_mask = special_tokens_mask | (input_ids == special_token)
     
-    # Get indices of special tokens
+    # 获取特殊 tokens 的索引
     idxs = jt.nonzero(special_tokens_mask)
     
-    # Generate attention mask and positional IDs
-    attention_mask = jt.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
+    # 生成注意力掩码和位置 IDs
+    attention_mask = (jt.init.eye(num_token, dtype=jt.float32) > 0.5).unsqueeze(0).repeat(bs, 1, 1)
     position_ids = jt.zeros((bs, num_token), dtype=jt.int64)
     
     previous_col = 0
     for i in range(idxs.shape[0]):
-        row, col = idxs[i]
-        if (col == 0) or (col == num_token - 1):
+        row = int(idxs[i, 0].item())
+        col = int(idxs[i, 1].item())
+        
+        if col == 0 or col == num_token - 1:
             attention_mask[row, col, col] = True
             position_ids[row, col] = 0
         else:
-            attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
-            position_ids[row, previous_col + 1 : col + 1] = jt.arange(
-                0, col - previous_col, dtype=jt.int64
-            )
+            attention_mask[row, previous_col + 1:col + 1, previous_col + 1:col + 1] = True
+            position_ids[row, previous_col + 1:col + 1] = jt.arange(0, col - previous_col, dtype=jt.int64)
         previous_col = col
     
     return attention_mask, position_ids
 
 
-def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_tokens_list, tokenizer):
-    """Generate attention mask between each pair of special tokens with transfer map
+def generate_masks_with_special_tokens_and_transfer_map(
+    tokenized: Dict,
+    special_tokens_list: List[int]
+) -> Tuple[jt.Var, jt.Var, List]:
+    """
+    生成带有特殊 tokens 和传输映射的注意力掩码
     
     Args:
-        tokenized: Tokenized input dictionary
-        special_tokens_list: List of special token IDs
-        tokenizer: Tokenizer instance
+        tokenized: 分词后的输入字典
+        special_tokens_list: 特殊 token IDs 列表
         
     Returns:
-        Tuple of attention_mask, position_ids, and cate_to_token_mask_list
+        (attention_mask, position_ids, cate_to_token_mask_list)
     """
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     
-    # Special tokens mask
+    # 特殊 tokens 掩码
     special_tokens_mask = jt.zeros((bs, num_token), dtype=jt.bool)
     for special_token in special_tokens_list:
         special_tokens_mask = special_tokens_mask | (input_ids == special_token)
     
-    # Get indices of special tokens
+    # 获取特殊 tokens 的索引
     idxs = jt.nonzero(special_tokens_mask)
     
-    # Generate attention mask and positional IDs
-    attention_mask = jt.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
+    # 生成注意力掩码和位置 IDs
+    attention_mask = jt.init.eye(num_token, dtype=jt.bool).unsqueeze(0).repeat(bs, 1, 1)
     position_ids = jt.zeros((bs, num_token), dtype=jt.int64)
     cate_to_token_mask_list = [[] for _ in range(bs)]
     
     previous_col = 0
     for i in range(idxs.shape[0]):
-        row, col = idxs[i]
-        if (col == 0) or (col == num_token - 1):
+        row = int(idxs[i, 0].item())
+        col = int(idxs[i, 1].item())
+        
+        if col == 0 or col == num_token - 1:
             attention_mask[row, col, col] = True
             position_ids[row, col] = 0
         else:
-            attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
-            position_ids[row, previous_col + 1 : col + 1] = jt.arange(
-                0, col - previous_col, dtype=jt.int64
-            )
-            c2t_maski = jt.zeros((num_token), dtype=jt.bool)
-            c2t_maski[previous_col + 1 : col] = True
+            attention_mask[row, previous_col + 1:col + 1, previous_col + 1:col + 1] = True
+            position_ids[row, previous_col + 1:col + 1] = jt.arange(0, col - previous_col, dtype=jt.int64)
+            c2t_maski = jt.zeros((num_token,), dtype=jt.bool)
+            c2t_maski[previous_col + 1:col] = True
             cate_to_token_mask_list[row].append(c2t_maski)
         previous_col = col
     
-    # Stack category to token masks
-    cate_to_token_mask_list = [
-        jt.stack(cate_to_token_mask_listi, dim=0)
-        for cate_to_token_mask_listi in cate_to_token_mask_list
-    ]
+    # 堆叠 category to token masks
+    for i in range(bs):
+        if cate_to_token_mask_list[i]:
+            cate_to_token_mask_list[i] = jt.stack(cate_to_token_mask_list[i], dim=0)
+        else:
+            cate_to_token_mask_list[i] = jt.zeros((0, num_token), dtype=jt.bool)
     
     return attention_mask, position_ids, cate_to_token_mask_list
 
 
+# 为了向后兼容，保留旧的类名
+class BertModelWarper(nn.Module):
+    """向后兼容的别名"""
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        print("Warning: BertModelWarper is deprecated, use BERTWrapper instead")
+
+
+class TextEncoderShell(nn.Module):
+    """向后兼容的别名"""
+    def __init__(self, text_encoder):
+        super().__init__()
+        self.text_encoder = text_encoder
+    
+    def execute(self, **kwargs):
+        return self.text_encoder(**kwargs)
+
+
 class BaseModelOutputWithPoolingAndCrossAttentions:
-    """Base class for model's outputs with pooling and cross-attentions"""
+    """模型输出的基类"""
     
     def __init__(
         self,
