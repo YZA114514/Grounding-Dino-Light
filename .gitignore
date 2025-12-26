@@ -49,33 +49,23 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Test files
-test_*.py
-check_*.py
-inspect_*.py
-debug_*.py
-visualize_*.py
-
-# Temp files
+# Temporary files
 *.tmp
 *.temp
 tmp/
 temp/
 
-# Data directories
-data/
-datasets/
-images/
-annotations/
-LVIS/
-val2017/
-inference_results/
+# Model checkpoints and weights (uncomment if you don't want to upload large model files)
+ *.pth
+ *.pt
+ *.ckpt
+ *.h5
 
-# Large model files
-*.pth
-*.pkl
-*.ckpt
-*.h5
+# Data directories (uncomment if you don't want to upload dataset files)
+ data/
+ datasets/
+ images/
+ annotations/
 
 # Output directories
 output/
@@ -89,3 +79,9 @@ GroundingDINO_Jittor/weights/
 
 GroundingDINO_Jittor/models/
 GroundingDINO_Jittor/jittor_implementation/__pycache__/
+
+*.zip
+*.tar.gz
+*.jpg
+*.png
+*.jpeg
