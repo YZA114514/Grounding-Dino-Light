@@ -95,6 +95,19 @@ def parse_args():
     return parser.parse_args()
 
 
+def precompute_text_embeddings(model, batch_info):
+    """Precompute text embeddings for all batches to avoid recomputing per image."""
+    print("Precomputing text embeddings for all category batches...")
+    text_cache = []
+    for i, batch in enumerate(batch_info):
+        print(f"  Batch {i+1}/{len(batch_info)}: {len(batch['cat_ids'])} categories")
+        with jt.no_grad():
+            text_dict = model.encode_text([batch['caption']])
+        text_cache.append(text_dict)
+    print("Text embedding precomputation completed.")
+    return text_cache
+
+
 def build_category_batches(categories, tokenizer, batch_size=80, max_text_len=256):
     """Build batches of categories with their positive maps."""
     num_batches = (len(categories) + batch_size - 1) // batch_size
@@ -124,58 +137,82 @@ def build_category_batches(categories, tokenizer, batch_size=80, max_text_len=25
     return batch_info
 
 
-def run_inference_batched(model, img_tensor, batch_info, orig_size, num_select=300):
-    """Run inference on all category batches and aggregate results."""
+def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=300):
+    """Optimized inference using cached vision features and precomputed text embeddings."""
     orig_w, orig_h = orig_size
     all_predictions = []
-    
-    for batch in batch_info:
-        caption = batch['caption']
+
+    # Extract vision features once for this image
+    with jt.no_grad():
+        vision_features = model.encode_image(img_tensor)
+
+    for batch_idx, batch in enumerate(batch_info):
         positive_map_np = batch['positive_map']
         batch_cat_ids = batch['cat_ids']
-        
+
+        # Use cached text features
         with jt.no_grad():
-            outputs = model([img_tensor], captions=[caption])
-        
+            outputs = model(
+                img_tensor,
+                text_dict=text_cache[batch_idx],
+                vision_features=vision_features
+            )
+
         pred_logits = outputs['pred_logits'][0].numpy()
         pred_boxes = outputs['pred_boxes'][0].numpy()
-        
-        # Convert logits to probabilities
+
+        # Vectorized computation: Convert logits to probabilities and map to labels
         prob_to_token = 1 / (1 + np.exp(-pred_logits))  # sigmoid
         prob_to_label = prob_to_token @ positive_map_np.T
-        
-        # Extract predictions for each query and category
-        for q_idx in range(pred_boxes.shape[0]):
-            for c_idx, cat_id in enumerate(batch_cat_ids):
-                score = prob_to_label[q_idx, c_idx]
-                if score < 0.001:  # Low threshold to keep candidates
-                    continue
-                
-                # Convert box from cxcywh normalized to xywh absolute
-                cx, cy, w, h = pred_boxes[q_idx]
-                x1 = (cx - w / 2) * orig_w
-                y1 = (cy - h / 2) * orig_h
-                bw = w * orig_w
-                bh = h * orig_h
-                
-                # Clip to image bounds
-                x1 = max(0, x1)
-                y1 = max(0, y1)
-                bw = min(bw, orig_w - x1)
-                bh = min(bh, orig_h - y1)
-                
-                if bw <= 0 or bh <= 0:
-                    continue
-                
-                all_predictions.append({
-                    'category_id': int(cat_id),
-                    'bbox': [float(x1), float(y1), float(bw), float(bh)],
-                    'score': float(score)
-                })
-    
+
+        # Vectorized filtering and box conversion
+        threshold = 0.001
+        q_idxs, c_idxs = np.where(prob_to_label >= threshold)
+        scores = prob_to_label[q_idxs, c_idxs]
+
+        if len(scores) == 0:
+            continue
+
+        # Vectorized box conversion
+        boxes = pred_boxes[q_idxs]
+        cx, cy, w, h = boxes.T
+
+        # Convert to absolute coordinates (vectorized)
+        x1 = np.clip((cx - w/2) * orig_w, 0, orig_w - w*orig_w)
+        y1 = np.clip((cy - h/2) * orig_h, 0, orig_h - h*orig_h)
+        bw = np.clip(w * orig_w, 0, orig_w - x1)
+        bh = np.clip(h * orig_h, 0, orig_h - y1)
+
+        # Filter valid boxes
+        valid = (bw > 0) & (bh > 0)
+        q_idxs = q_idxs[valid]
+        c_idxs = c_idxs[valid]
+        scores = scores[valid]
+        x1 = x1[valid]
+        y1 = y1[valid]
+        bw = bw[valid]
+        bh = bh[valid]
+
+        # Build predictions (vectorized)
+        batch_preds = [
+            {
+                'category_id': int(batch_cat_ids[c_idx]),
+                'bbox': [float(x), float(y), float(w_), float(h_)],
+                'score': float(score)
+            }
+            for x, y, w_, h_, score, c_idx in zip(x1, y1, bw, bh, scores, c_idxs)
+        ]
+
+        all_predictions.extend(batch_preds)
+
     # Keep top-k predictions
     all_predictions.sort(key=lambda x: x['score'], reverse=True)
     return all_predictions[:num_select]
+
+
+def run_inference_batched(model, img_tensor, batch_info, orig_size, num_select=300):
+    """Legacy function for backward compatibility - use run_inference_batched_optimized instead."""
+    return run_inference_batched_optimized(model, img_tensor, batch_info, None, orig_size, num_select)
 
 
 def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, output_dir):
@@ -322,17 +359,23 @@ def main():
     # Load model
     print(f"\n[3/5] Loading model from {args.checkpoint}...")
     model = load_model(args.checkpoint)
-    
+
+    # Precompute text embeddings (OPTIMIZATION)
+    print(f"\n[3.5/5] Precomputing text embeddings...")
+    text_cache = precompute_text_embeddings(model, batch_info)
+
     # Run inference
-    print(f"\n[4/5] Running inference on {len(image_ids)} images...")
-    print(f"  (Each image requires {len(batch_info)} forward passes)")
-    
+    print(f"\n[4/5] Running OPTIMIZED inference on {len(image_ids)} images...")
+    print(f"  (Vision features cached per image, text embeddings precomputed)")
+    print(f"  (Each image now requires only {len(batch_info)} decoder passes)")
+
     start_time = time.time()
     all_predictions = []
-    
-    for img_id in tqdm(image_ids, desc="Processing images"):
+    SYNC_INTERVAL = 10  # Sync every 10 images instead of every image
+
+    for img_idx, img_id in enumerate(tqdm(image_ids, desc="Processing images")):
         img_info = images[img_id]
-        
+
         # Get filename
         if 'file_name' in img_info:
             file_name = img_info['file_name']
@@ -340,32 +383,39 @@ def main():
             file_name = img_info['coco_url'].split('/')[-1]
         else:
             file_name = f"{img_id:012d}.jpg"
-        
+
         img_path = os.path.join(args.image_dir, file_name)
-        
+
         if not os.path.exists(img_path):
             continue
-        
+
         # Load and preprocess image
         image = Image.open(img_path).convert('RGB')
         orig_w, orig_h = image.size
         img_tensor, _ = preprocess_image(image, config)
-        
-        # Run batched inference
-        img_preds = run_inference_batched(
-            model, img_tensor, batch_info, 
+
+        # Run OPTIMIZED batched inference with cached features
+        img_preds = run_inference_batched_optimized(
+            model, img_tensor, batch_info, text_cache,
             (orig_w, orig_h), args.num_select
         )
-        
+
         # Add image_id to predictions
         for pred in img_preds:
             pred['image_id'] = int(img_id)
         all_predictions.extend(img_preds)
-        
-        # Cleanup
+
+        # Periodic cleanup (reduced frequency)
+        if (img_idx + 1) % SYNC_INTERVAL == 0:
+            jt.sync_all()
+            jt.gc()
+
+        # Cleanup tensor
         del img_tensor
-        jt.sync_all()
-        jt.gc()
+
+    # Final cleanup
+    jt.sync_all()
+    jt.gc()
     
     elapsed = time.time() - start_time
     print(f"\n  Inference completed in {elapsed/60:.1f} minutes")
