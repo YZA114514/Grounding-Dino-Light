@@ -36,24 +36,9 @@ class BERTWrapper(nn.Module):
         self.max_text_len = max_text_len
         self.model_name = model_name
         
-        # 使用 HuggingFace BERT（直接加载本地模型）
-        local_bert_paths = [
-            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'models', 'bert-base-uncased'),
-            'models/bert-base-uncased',
-            './models/bert-base-uncased',
-        ]
-        
-        bert_path = None
-        for path in local_bert_paths:
-            if os.path.exists(path) and os.path.isdir(path):
-                bert_path = path
-                break
-        
-        if bert_path is None:
-            raise RuntimeError("Cannot find local BERT model. Please ensure models/bert-base-uncased exists.")
-        
-        print(f"Loading HuggingFace BERT from: {bert_path}")
-        self.bert = HFBertModel.from_pretrained(bert_path)
+        # 使用 HuggingFace BERT（直接从缓存加载）
+        print(f"Loading HuggingFace BERT from cache: {model_name}")
+        self.bert = HFBertModel.from_pretrained(model_name)
         self.bert.eval()  # 推理模式
         
         # 初始化 tokenizer

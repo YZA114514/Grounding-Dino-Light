@@ -84,6 +84,102 @@ GroundingDINO_Jittor/
 └── README.md
 ```
 
+## Evaluation Scripts Comparison
+
+This project includes several evaluation scripts with different purposes and trade-offs:
+
+### Script Overview
+
+| Script | Purpose | Zero-Shot | Speed | Use Case |
+|--------|----------|-----------|-------|----------|
+| `eval_lvis_zeroshot_full.py` | Official benchmarking | ✓ True (all 1203 cats) | Slow (~1-5s/img) | Research, papers |
+| `quick_test_zeroshot.py` | Development/testing | ✗ Uses GT | Fast (~0.1-0.5s/img) | Debugging, visualization |
+| `eval_lvis_zeroshot.py` | Alternative evaluation | ✗ Uses GT | Medium | Development |
+| `eval_lvis_zeroshot_final.py` | Debug version | ✗ Partial (25 cats) | Medium | Token mapping debugging |
+
+### Key Differences
+
+#### 1. Category Handling
+
+**`eval_lvis_zeroshot_full.py` (True Zero-Shot)**
+- Processes ALL 1203 LVIS categories in batches (default 80 per batch)
+- Uses PyTorch's `build_captions_and_token_span()` for proper token mapping
+- Multiple forward passes per image (~15 for full evaluation)
+- Results comparable to Grounding DINO paper
+
+**`quick_test_zeroshot.py` (Non-Zero-Shot)**
+- Uses ONLY ground truth categories from each image
+- Typically 2-10 categories per image
+- Single forward pass per image
+- Good for quick sanity checks but NOT for benchmarking
+
+#### 2. Token-to-Category Mapping
+
+**`eval_lvis_zeroshot_full.py`**
+```python
+# Uses positive map matrix from PyTorch utilities
+positive_map = create_positive_map_from_span(tokenized, tokenspanlist, max_text_len)
+prob_to_label = prob_to_token @ positive_map_np.T
+```
+
+**`quick_test_zeroshot.py`**
+```python
+# Simple argmax approach
+pred_probs = jt.sigmoid(pred_logits)
+max_probs, pred_labels = jt.argmax(pred_probs, dim=-1)
+```
+
+#### 3. Evaluation Method
+
+**`eval_lvis_zeroshot_full.py`**
+- Official COCO/LVIS evaluation
+- Full metric suite: AP, AP50, AP75, APs, APm, APl, APr, APc, APf
+- Reproducible and comparable with paper results
+
+**`quick_test_zeroshot.py`**
+- Custom IoU-based TP calculation
+- Simple precision/recall/F1
+- Includes visualization of bounding boxes
+
+### When to Use Which Script?
+
+#### Use `eval_lvis_zeroshot_full.py` when:
+- ✓ Running official benchmarks for research papers
+- ✓ Comparing with Grounding DINO paper metrics
+- ✓ Need all COCO/LVIS metrics
+
+#### Use `quick_test_zeroshot.py` when:
+- ✓ Debugging model inference
+- ✓ Visualizing predictions on sample images
+- ✓ Quick sanity checks during development
+- ✓ Testing model loading and basic functionality
+- ✓ Verifying output format
+
+### Performance Characteristics
+
+| Metric | eval_lvis_zeroshot_full | quick_test_zeroshot |
+|--------|-------------------------|---------------------|
+| **Categories processed** | 1203 | ~5 (GT only) |
+| **Forward passes/image** | ~15 | 1 |
+| **Memory usage** | Higher | Lower |
+| **Time per image** | 1-5 seconds | 0.1-0.5 seconds |
+| **Total time (100 images)** | ~2-8 minutes | ~10-50 seconds |
+| **Visualization** | No | Yes |
+| **Official metrics** | Yes | No |
+
+### Example Usage
+
+```bash
+# True zero-shot evaluation (use for benchmarks)
+python scripts/eval_lvis_zeroshot_full.py --num_images 100 --gpu 0
+
+# Quick testing with visualization (use for debugging)
+python scripts/quick_test_zeroshot.py \
+    --num_images 10 \
+    --output_dir outputs/quick_test \
+    --box_threshold 0.1
+```
+
 ## Installation
 
 ### 前置要求
@@ -214,10 +310,10 @@ Run the full zero-shot evaluation on LVIS dataset:
 
 ```bash
 # Quick test on 100 images
-python scripts/eval_lvis_zeroshot_full.py --num_images 100 --gpu 4
+python scripts/eval_lvis_zeroshot_full.py --num_images 100 --gpu 0
 
 # Full validation set (~17K images, ~85 hours)
-python scripts/eval_lvis_zeroshot_full.py --full --gpu 4
+python scripts/eval_lvis_zeroshot_full.py --full --gpu 0
 
 # Custom parameters
 python scripts/eval_lvis_zeroshot_full.py \
@@ -235,7 +331,7 @@ Fine-tune Grounding DINO on LVIS dataset to achieve **AP 52.1** (target from pap
 
 ```bash
 # Quick test (verify script works)
-python scripts/finetune_lvis_full.py --test_only --num_samples 10 --epochs 2 --gpu 4
+python scripts/finetune_lvis_full.py --test_only --num_samples 10 --epochs 2 --gpu 0
 
 # Full fine-tuning (recommended settings from paper)
 python scripts/finetune_lvis_full.py \
@@ -245,7 +341,7 @@ python scripts/finetune_lvis_full.py \
     --lr_backbone 1e-5 \
     --lr_drop 15 \
     --output_dir outputs/finetune_lvis \
-    --gpu 4
+    --gpu 0
 
 # With frozen backbone (faster, less memory)
 python scripts/finetune_lvis_full.py \
@@ -253,7 +349,7 @@ python scripts/finetune_lvis_full.py \
     --batch_size 8 \
     --freeze_backbone \
     --output_dir outputs/finetune_frozen_backbone \
-    --gpu 4
+    --gpu 0
 ```
 
 **Fine-tuning Targets:**
@@ -504,4 +600,3 @@ python -m jittor_implementation.experiments.vlm_comparison \
   --output_dir ./comparison_results \
   --save_visualizations
 ```
-

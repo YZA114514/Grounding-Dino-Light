@@ -20,8 +20,27 @@ import argparse
 import time
 from datetime import datetime
 
-# Set GPU before importing jittor
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '4')
+# Set GPU before importing jittor (check if GPU is available)
+cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
+# Check if CUDA_VISIBLE_DEVICES is set to empty (CPU mode) or invalid GPU
+if cuda_visible == '' or not cuda_visible.strip():
+    cuda_visible = ''  # Force CPU mode
+else:
+    # Check if the specified GPU exists
+    try:
+        gpu_id = int(cuda_visible)
+        # Simple check: try to get GPU info
+        import subprocess
+        result = subprocess.run(['nvidia-smi', '--query-gpu=index', '--format=csv,noheader'], capture_output=True, text=True)
+        available_gpus = [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
+        if gpu_id not in available_gpus:
+            print(f"Warning: GPU {gpu_id} not available. Available GPUs: {available_gpus}")
+            cuda_visible = ''  # Fall back to CPU
+    except:
+        print("Warning: Could not check GPU availability, falling back to CPU")
+        cuda_visible = ''
+
+os.environ['CUDA_VISIBLE_DEVICES'] = cuda_visible
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE_DIR, 'jittor_implementation'))
@@ -41,7 +60,13 @@ from quick_test_zeroshot import load_model, preprocess_image, Config
 from groundingdino.util.vl_utils import build_captions_and_token_span, create_positive_map_from_span
 from transformers import AutoTokenizer
 
-jt.flags.use_cuda = 1
+# Set CUDA flag based on GPU availability
+if cuda_visible == '':
+    jt.flags.use_cuda = 0
+    print("Using CPU mode")
+else:
+    jt.flags.use_cuda = 1
+    print(f"Using GPU mode (GPU {cuda_visible})")
 
 
 def parse_args():
@@ -65,7 +90,7 @@ def parse_args():
                         help='Number of top predictions to keep per image')
     parser.add_argument('--output_dir', type=str, default='outputs',
                         help='Output directory for results')
-    parser.add_argument('--gpu', type=int, default=4,
+    parser.add_argument('--gpu', type=int, default=0,
                         help='GPU device ID')
     return parser.parse_args()
 
@@ -288,7 +313,7 @@ def main():
     
     # Load tokenizer and build category batches
     print(f"\n[2/5] Building category batches (batch_size={args.batch_size})...")
-    tokenizer = AutoTokenizer.from_pretrained(os.path.join(BASE_DIR, 'models/bert-base-uncased'))
+    tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
     batch_info = build_category_batches(categories, tokenizer, args.batch_size)
     
     print(f"  Number of batches: {len(batch_info)}")
@@ -387,5 +412,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
