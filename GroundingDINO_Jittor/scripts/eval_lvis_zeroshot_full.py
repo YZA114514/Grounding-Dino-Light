@@ -20,6 +20,9 @@ import argparse
 import time
 from datetime import datetime
 
+# Force HuggingFace offline mode (skip network checks for cached models)
+os.environ['HF_HUB_OFFLINE'] = '1'
+
 # Set GPU before importing jittor (check if GPU is available)
 cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
 # Check if CUDA_VISIBLE_DEVICES is set to empty (CPU mode) or invalid GPU
