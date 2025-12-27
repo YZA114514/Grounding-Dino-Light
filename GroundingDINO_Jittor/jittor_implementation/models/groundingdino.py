@@ -434,16 +434,16 @@ class GroundingDINO(nn.Module):
 
         return text_dict
 
-    def encode_image(self, samples):
+    def encode_image_projection(self, samples):
         """
-        Extract vision features from image for caching and reuse.
-        Returns intermediate features that can be passed to execute() with vision_features.
+        Extract and project vision features from image for caching (backbone + projection only).
+        This allows skipping the expensive backbone computation while preserving text-vision fusion.
 
         Args:
             samples: Input image tensor [bs, 3, H, W], [3, H, W], or NestedTensor
 
         Returns:
-            vision_features: Dict containing cached features for decoder
+            projected_features: Dict containing projected features for encoder
         """
         # ============================================================
         # 1. 处理输入
@@ -623,37 +623,9 @@ class GroundingDINO(nn.Module):
         # valid_ratios = jt.stack([jt.ones((bs, 2), dtype=jt.float32) for _ in range(len(spatial_shapes))], dim=1)
         valid_ratios = jt.stack(valid_ratios_list, dim=1).float32()
 
-        # ============================================================
-        # 4. Encoder (only up to memory output)
-        # ============================================================
-        src_flatten = src_flatten.float32()
-        lvl_pos_embed_flatten = lvl_pos_embed_flatten.float32()
-        valid_ratios = valid_ratios.float32()
-
-        # Create dummy text features for encoder
-        dummy_text_dict = {
-            "encoded_text": jt.zeros((bs, self.max_text_len, self.hidden_dim), dtype=jt.float32),
-            "text_token_mask": jt.ones((bs, self.max_text_len), dtype=jt.bool),
-            "position_ids": jt.arange(self.max_text_len, dtype=jt.int64).unsqueeze(0).repeat(bs, 1),
-            "text_self_attention_masks": jt.ones((bs, self.max_text_len, self.max_text_len), dtype=jt.bool),
-        }
-
-        memory, memory_text = self.transformer.encoder(
-            src=src_flatten,  # [bs, sum(hw), c]
-            pos=lvl_pos_embed_flatten,  # [bs, sum(hw), c]
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            valid_ratios=valid_ratios,
-            key_padding_mask=mask_flatten,
-            memory_text=dummy_text_dict["encoded_text"],
-            text_attention_mask=jt.logical_not(dummy_text_dict["text_token_mask"]),  # Invert mask like PyTorch
-            position_ids=dummy_text_dict["position_ids"],
-            text_self_attention_masks=dummy_text_dict["text_self_attention_masks"],
-        )
-
-        # Return cached vision features
-        vision_features = {
-            'memory': memory,
+        # Return projected features (encoder will be run later with real text)
+        projected_features = {
+            'src_flatten': src_flatten,
             'mask_flatten': mask_flatten,
             'lvl_pos_embed_flatten': lvl_pos_embed_flatten,
             'spatial_shapes': spatial_shapes,
@@ -661,7 +633,7 @@ class GroundingDINO(nn.Module):
             'valid_ratios': valid_ratios,
         }
 
-        return vision_features
+        return projected_features
     
     def gen_encoder_output_proposals(self, memory, memory_padding_mask, spatial_shapes):
         """
@@ -766,8 +738,8 @@ class GroundingDINO(nn.Module):
         # 1. 处理输入
         # ============================================================
         if vision_features is not None:
-            # 使用缓存的视觉特征，直接提取 batch size
-            bs = vision_features['memory'].shape[0]
+            # 使用缓存的投影特征，直接提取 batch size
+            bs = vision_features['src_flatten'].shape[0]
         else:
             if isinstance(samples, (list, jt.Var)):
                 # 简单处理：假设是 batch 的图像张量
@@ -819,17 +791,17 @@ class GroundingDINO(nn.Module):
         # 3. 提取视觉特征 (或使用缓存)
         # ============================================================
         if vision_features is not None:
-            # 使用缓存的视觉特征 - 完全跳过视觉提取
-            memory = vision_features['memory']
+            # 使用缓存的投影特征 - 运行 encoder 获取完整特征
+            src_flatten = vision_features['src_flatten']
             mask_flatten = vision_features['mask_flatten']
             lvl_pos_embed_flatten = vision_features['lvl_pos_embed_flatten']
             spatial_shapes = vision_features['spatial_shapes']
             level_start_index = vision_features['level_start_index']
             valid_ratios = vision_features['valid_ratios']
 
-            # 运行 encoder 以获取增强的文本特征
-            _, memory_text = self.transformer.encoder(
-                src=memory,  # [bs, sum(hw), c]
+            # 运行 encoder 以获取增强的文本特征和视觉特征
+            memory, memory_text = self.transformer.encoder(
+                src=src_flatten,  # [bs, sum(hw), c] - cached projected features
                 pos=lvl_pos_embed_flatten,  # [bs, sum(hw), c]
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,

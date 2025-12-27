@@ -138,24 +138,32 @@ def build_category_batches(categories, tokenizer, batch_size=80, max_text_len=25
 
 
 def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=300):
-    """Optimized inference using cached vision features and precomputed text embeddings."""
+    """Optimized inference using cached projection features and precomputed text embeddings."""
     orig_w, orig_h = orig_size
     all_predictions = []
 
-    # Extract vision features once for this image
+    # Extract projection features once for this image (backbone + projection only)
     with jt.no_grad():
-        vision_features = model.encode_image(img_tensor)
+        projected_features = model.encode_image_projection(img_tensor)
 
+    # Run encoder + decoder with real text for each batch
     for batch_idx, batch in enumerate(batch_info):
         positive_map_np = batch['positive_map']
         batch_cat_ids = batch['cat_ids']
 
-        # Use cached text features
+        # Encode text fresh for this batch (required for proper text-vision fusion)
         with jt.no_grad():
+            if text_cache is None:
+                # Fresh text encoding for each batch
+                text_dict = model.encode_text([batch['caption']])
+            else:
+                # Use cached text (legacy mode)
+                text_dict = text_cache[batch_idx]
+
             outputs = model(
                 img_tensor,
-                text_dict=text_cache[batch_idx],
-                vision_features=vision_features
+                text_dict=text_dict,
+                vision_features=projected_features
             )
 
         pred_logits = outputs['pred_logits'][0].numpy()
@@ -360,14 +368,12 @@ def main():
     print(f"\n[3/5] Loading model from {args.checkpoint}...")
     model = load_model(args.checkpoint)
 
-    # Precompute text embeddings (OPTIMIZATION)
-    print(f"\n[3.5/5] Precomputing text embeddings...")
-    text_cache = precompute_text_embeddings(model, batch_info)
+    # Text embeddings will be encoded fresh for each batch (required for proper text-vision fusion)
 
     # Run inference
     print(f"\n[4/5] Running OPTIMIZED inference on {len(image_ids)} images...")
-    print(f"  (Vision features cached per image, text embeddings precomputed)")
-    print(f"  (Each image now requires only {len(batch_info)} decoder passes)")
+    print(f"  (Vision features cached per image, text encoded fresh per batch)")
+    print(f"  (Each image now requires only {len(batch_info)} encoder+decoder passes)")
 
     start_time = time.time()
     all_predictions = []
@@ -396,7 +402,7 @@ def main():
 
         # Run OPTIMIZED batched inference with cached features
         img_preds = run_inference_batched_optimized(
-            model, img_tensor, batch_info, text_cache,
+            model, img_tensor, batch_info, None,  # Text encoded fresh per batch
             (orig_w, orig_h), args.num_select
         )
 
