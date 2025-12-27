@@ -440,7 +440,7 @@ class GroundingDINO(nn.Module):
         Returns intermediate features that can be passed to execute() with vision_features.
 
         Args:
-            samples: Input image tensor [bs, 3, H, W] or NestedTensor
+            samples: Input image tensor [bs, 3, H, W], [3, H, W], or NestedTensor
 
         Returns:
             vision_features: Dict containing cached features for decoder
@@ -452,6 +452,10 @@ class GroundingDINO(nn.Module):
             # 简单处理：假设是 batch 的图像张量
             if isinstance(samples, list):
                 samples = jt.stack(samples)
+
+            # Handle both single image [C, H, W] and batch [bs, C, H, W]
+            if samples.ndim == 3:
+                samples = samples.unsqueeze(0)  # [C, H, W] -> [1, C, H, W]
 
             # 创建掩码（全 False，即全部有效）
             bs, _, H, W = samples.shape
@@ -761,18 +765,31 @@ class GroundingDINO(nn.Module):
         # ============================================================
         # 1. 处理输入
         # ============================================================
-        if isinstance(samples, (list, jt.Var)):
-            # 简单处理：假设是 batch 的图像张量
-            if isinstance(samples, list):
-                samples = jt.stack(samples)
-
-            # 创建掩码（全 False，即全部有效）
-            bs, _, H, W = samples.shape
-            masks = [jt.zeros((H, W), dtype=jt.bool) for _ in range(bs)]
+        if vision_features is not None:
+            # 使用缓存的视觉特征，直接提取 batch size
+            bs = vision_features['memory'].shape[0]
         else:
-            # NestedTensor 格式
-            samples, masks = samples.decompose()
-            bs = samples.shape[0]
+            if isinstance(samples, (list, jt.Var)):
+                # 简单处理：假设是 batch 的图像张量
+                if isinstance(samples, list):
+                    samples = jt.stack(samples)
+
+                # Handle both 3D [C, H, W] and 4D [bs, C, H, W] tensors
+                if samples.ndim == 4:
+                    bs, _, H, W = samples.shape
+                elif samples.ndim == 3:
+                    # Single image case [C, H, W]
+                    bs = 1
+                    _, H, W = samples.shape
+                else:
+                    raise ValueError(f"Unexpected tensor shape: {samples.shape}")
+
+                # 创建掩码（全 False，即全部有效）
+                masks = [jt.zeros((H, W), dtype=jt.bool) for _ in range(bs)]
+            else:
+                # NestedTensor 格式
+                samples, masks = samples.decompose()
+                bs = samples.shape[0]
 
         # ============================================================
         # 2. 处理文本特征
@@ -802,21 +819,13 @@ class GroundingDINO(nn.Module):
         # 3. 提取视觉特征 (或使用缓存)
         # ============================================================
         if vision_features is not None:
-            # 使用缓存的视觉特征
+            # 使用缓存的视觉特征 - 完全跳过视觉提取
             memory = vision_features['memory']
             mask_flatten = vision_features['mask_flatten']
             lvl_pos_embed_flatten = vision_features['lvl_pos_embed_flatten']
             spatial_shapes = vision_features['spatial_shapes']
             level_start_index = vision_features['level_start_index']
             valid_ratios = vision_features['valid_ratios']
-
-            # 创建 dummy text features for encoder
-            dummy_text_dict = {
-                "encoded_text": jt.zeros((bs, self.max_text_len, self.hidden_dim), dtype=jt.float32),
-                "text_token_mask": jt.ones((bs, self.max_text_len), dtype=jt.bool),
-                "position_ids": jt.arange(self.max_text_len, dtype=jt.int64).unsqueeze(0).repeat(bs, 1),
-                "text_self_attention_masks": jt.ones((bs, self.max_text_len, self.max_text_len), dtype=jt.bool),
-            }
 
             # 运行 encoder 以获取增强的文本特征
             _, memory_text = self.transformer.encoder(
@@ -835,202 +844,202 @@ class GroundingDINO(nn.Module):
         else:
             # 原始视觉特征提取逻辑
             # 获取 backbone 通道数（用于生成正确维度的特征）
-        if hasattr(self, 'input_proj') and len(self.input_proj) > 0:
-            # 从 input_proj 推断 backbone 通道数
-            backbone_channels = []
-            for proj in self.input_proj:
-                if hasattr(proj[0], 'in_channels'):
-                    backbone_channels.append(proj[0].in_channels)
-                else:
-                    backbone_channels.append(self.hidden_dim)
-        else:
-            backbone_channels = [192, 384, 768, 768]
-        
-        if self.backbone is not None:
-            # features, poss = self.backbone(samples)
-            features = self.backbone(samples)
-            if isinstance(features, tuple) and len(features) == 2:
-                features, poss = features
+            if hasattr(self, 'input_proj') and len(self.input_proj) > 0:
+                # 从 input_proj 推断 backbone 通道数
+                backbone_channels = []
+                for proj in self.input_proj:
+                    if hasattr(proj[0], 'in_channels'):
+                        backbone_channels.append(proj[0].in_channels)
+                    else:
+                        backbone_channels.append(self.hidden_dim)
             else:
-                poss = None
-        else:
-            # 使用占位符特征（用于测试，无 backbone）
-            # backbone_channels = [192, 384, 768, 768]
-            # 前 3 层来自 backbone 的多尺度输出，第 4 层是额外下采样
-            # 但是由于没有 backbone，我们需要生成所有 4 层的特征
-            features = []
-            poss = []
-            h, w = H // 4, W // 4  # 初始下采样 4x（Swin Stage 1 输出）
-            
-            # 生成所有层的特征
-            for i in range(self.num_feature_levels):
-                if i < len(backbone_channels):
-                    in_ch = backbone_channels[i]
+                backbone_channels = [192, 384, 768, 768]
+
+            if self.backbone is not None:
+                # features, poss = self.backbone(samples)
+                features = self.backbone(samples)
+                if isinstance(features, tuple) and len(features) == 2:
+                    features, poss = features
                 else:
-                    in_ch = backbone_channels[-1]
-                    
-                feat = jt.randn(bs, in_ch, h, w) * 0.1
-                pos = jt.zeros(bs, self.hidden_dim, h, w, dtype=jt.float32)
-                features.append((feat, jt.zeros((bs, h, w), dtype=jt.bool)))
-                poss.append(pos)
-                
-                # 下采样 2x（除了最后一层）
-                if i < self.num_feature_levels - 1:
-                    h, w = max(1, h // 2), max(1, w // 2)
-        
-        # ============================================================
-        # 4. 投影和展平特征
-        # ============================================================
-        srcs = []
-        masks_flat = []
-        
-        # 确定有多少层直接来自 backbone（或占位符）
-        num_backbone_levels = min(len(features), len(backbone_channels), self.num_feature_levels)
-        
-        # 处理来自 backbone 的特征层（使用 1x1 卷积投影）
-        for l in range(num_backbone_levels):
-            feat = features[l]
-            if hasattr(feat, 'decompose'):
-                src, mask = feat.decompose()
-            elif isinstance(feat, tuple):
-                src, mask = feat
+                    poss = None
             else:
-                src = feat
-                mask = jt.zeros((bs, src.shape[2], src.shape[3]), dtype=jt.bool)
-            
-            if l < len(self.input_proj):
-                srcs.append(self.input_proj[l](src))
-                masks_flat.append(mask)
-        
-        # 处理额外的下采样层（使用 3x3 stride=2 卷积）
-        if self.num_feature_levels > len(srcs) and len(self.input_proj) > len(srcs):
-            # 获取最后一层的原始特征（用于下采样）
-            if len(features) > num_backbone_levels:
-                # 如果有更多特征，使用它们
-                feat = features[num_backbone_levels]
+                # 使用占位符特征（用于测试，无 backbone）
+                # backbone_channels = [192, 384, 768, 768]
+                # 前 3 层来自 backbone 的多尺度输出，第 4 层是额外下采样
+                # 但是由于没有 backbone，我们需要生成所有 4 层的特征
+                features = []
+                poss = []
+                h, w = H // 4, W // 4  # 初始下采样 4x（Swin Stage 1 输出）
+
+                # 生成所有层的特征
+                for i in range(self.num_feature_levels):
+                    if i < len(backbone_channels):
+                        in_ch = backbone_channels[i]
+                    else:
+                        in_ch = backbone_channels[-1]
+
+                    feat = jt.randn(bs, in_ch, h, w) * 0.1
+                    pos = jt.zeros(bs, self.hidden_dim, h, w, dtype=jt.float32)
+                    features.append((feat, jt.zeros((bs, h, w), dtype=jt.bool)))
+                    poss.append(pos)
+
+                    # 下采样 2x（除了最后一层）
+                    if i < self.num_feature_levels - 1:
+                        h, w = max(1, h // 2), max(1, w // 2)
+
+            # ============================================================
+            # 4. 投影和展平特征
+            # ============================================================
+            srcs = []
+            masks_flat = []
+
+            # 确定有多少层直接来自 backbone（或占位符）
+            num_backbone_levels = min(len(features), len(backbone_channels), self.num_feature_levels)
+
+            # 处理来自 backbone 的特征层（使用 1x1 卷积投影）
+            for l in range(num_backbone_levels):
+                feat = features[l]
                 if hasattr(feat, 'decompose'):
-                    last_feat, _ = feat.decompose()
+                    src, mask = feat.decompose()
                 elif isinstance(feat, tuple):
-                    last_feat = feat[0]
+                    src, mask = feat
                 else:
-                    last_feat = feat
-            else:
-                # features is a dict or list
-                if isinstance(features, dict):
-                    feat = features[len(features)-1]
-                else:
-                    feat = features[-1]
-                
-                if hasattr(feat, 'decompose'):
-                    last_feat, _ = feat.decompose()
-                elif isinstance(feat, tuple):
-                    last_feat = feat[0]
-                else:
-                    last_feat = feat
-            
-            for l in range(len(srcs), self.num_feature_levels):
+                    src = feat
+                    mask = jt.zeros((bs, src.shape[2], src.shape[3]), dtype=jt.bool)
+
                 if l < len(self.input_proj):
-                    if l == num_backbone_levels:
-                        # 从原始特征下采样
-                        src = self.input_proj[l](last_feat)
-                    else:
-                        # 从上一个投影结果下采样（注意这里的 input_proj 可能是下采样层）
-                        src = self.input_proj[l](srcs[-1])
-                    
-                    # 创建对应的 mask
-                    if len(masks_flat) > 0:
-                        m = masks_flat[-1]
-                        mask = nn.interpolate(m.unsqueeze(1).float(), size=src.shape[-2:]).squeeze(1).bool()
-                    else:
-                        mask = jt.zeros((bs, src.shape[2], src.shape[3]), dtype=jt.bool)
-                    
-                    srcs.append(src)
+                    srcs.append(self.input_proj[l](src))
                     masks_flat.append(mask)
-        
-        # 展平特征
-        src_flatten = []
-        mask_flatten = []
-        lvl_pos_embed_flatten = []
-        spatial_shapes = []
-        valid_ratios_list = []
-        
-        for lvl, (src, mask) in enumerate(zip(srcs, masks_flat)):
-            bs, c, h, w = src.shape
-            spatial_shapes.append((h, w))
-            
-            # Calculate valid_ratios before flattening
-            valid_ratios_list.append(self.get_valid_ratio(mask))
-            
-            # Generate position embedding
-            pos = self.position_embedding(src, mask)
-            
-            src = src.flatten(2).transpose(1, 2)  # [bs, h*w, c]
-            mask = mask.flatten(1)  # [bs, h*w]
-            pos = pos.flatten(2).transpose(1, 2) # [bs, h*w, c]
-            
-            # 位置编码
-            pos_embed = pos
-            if self.level_embed is not None:
-                pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
-            
-            src_flatten.append(src)
-            mask_flatten.append(mask)
-            lvl_pos_embed_flatten.append(pos_embed)
-        
-        src_flatten = jt.concat(src_flatten, dim=1).float32()
-        mask_flatten = jt.concat(mask_flatten, dim=1)
-        lvl_pos_embed_flatten = jt.concat(lvl_pos_embed_flatten, dim=1).float32()
-        spatial_shapes = jt.array(spatial_shapes).int64()
-        level_start_index = jt.concat([
-            jt.zeros((1,), dtype=jt.int64),
-            (spatial_shapes[:, 0] * spatial_shapes[:, 1]).cumsum(0)[:-1]
-        ])
-        # valid_ratios = jt.stack([jt.ones((bs, 2), dtype=jt.float32) for _ in range(len(spatial_shapes))], dim=1)
-        valid_ratios = jt.stack(valid_ratios_list, dim=1).float32()
-        
-        # ============================================================
-        # 5. Encoder
-        # ============================================================
-        # print("Entering Encoder...")
-        # print(f"src_flatten dtype: {src_flatten.dtype}")
-        # print(f"src_flatten stats: min={src_flatten.min().item()}, max={src_flatten.max().item()}, mean={src_flatten.mean().item()}")
-        # if jt.any(jt.isnan(src_flatten)) or jt.any(jt.isinf(src_flatten)):
-        #     print("WARNING: src_flatten contains NaN or Inf!")
-        
-        # print(f"lvl_pos_embed_flatten dtype: {lvl_pos_embed_flatten.dtype}")
-        # print(f"spatial_shapes dtype: {spatial_shapes.dtype}")
-        # print(f"valid_ratios dtype: {valid_ratios.dtype}")
-        # print(f"valid_ratios values:\n{valid_ratios.numpy()}")
-        # print(f"Input memory_text stats: min={float(text_dict['encoded_text'].min())}, max={float(text_dict['encoded_text'].max())}")
 
-        # Ensure all inputs are float32
-        src_flatten = src_flatten.float32()
-        lvl_pos_embed_flatten = lvl_pos_embed_flatten.float32()
-        valid_ratios = valid_ratios.float32()
-        text_dict["encoded_text"] = text_dict["encoded_text"].float32()
+            # 处理额外的下采样层（使用 3x3 stride=2 卷积）
+            if self.num_feature_levels > len(srcs) and len(self.input_proj) > len(srcs):
+                # 获取最后一层的原始特征（用于下采样）
+                if len(features) > num_backbone_levels:
+                    # 如果有更多特征，使用它们
+                    feat = features[num_backbone_levels]
+                    if hasattr(feat, 'decompose'):
+                        last_feat, _ = feat.decompose()
+                    elif isinstance(feat, tuple):
+                        last_feat = feat[0]
+                    else:
+                        last_feat = feat
+                else:
+                    # features is a dict or list
+                    if isinstance(features, dict):
+                        feat = features[len(features)-1]
+                    else:
+                        feat = features[-1]
 
-        # Note: encoder expects [bs, sum(hw), c] format (NOT transposed)
-        # PyTorch: text_attention_mask=~text_dict["text_token_mask"]
-        # We need to invert the mask: True means pad (ignore), False means valid
-        memory, memory_text = self.transformer.encoder(
-            src=src_flatten,  # [bs, sum(hw), c]
-            pos=lvl_pos_embed_flatten,  # [bs, sum(hw), c]
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            valid_ratios=valid_ratios,
-            key_padding_mask=mask_flatten,
-            memory_text=text_dict["encoded_text"],
-            text_attention_mask=jt.logical_not(text_dict["text_token_mask"]),  # Invert mask like PyTorch
-            position_ids=text_dict["position_ids"],
-            text_self_attention_masks=text_dict["text_self_attention_masks"],
-        )
-        # print("Encoder finished.")
-        
-        # CRITICAL: Update text_dict with encoder-enhanced text features
-        # This is done in PyTorch's Transformer.forward (line 279)
-        # print(f"DEBUG before update: encoded_text min={text_dict['encoded_text'].min().item():.3f}, max={text_dict['encoded_text'].max().item():.3f}")
-        # print(f"DEBUG memory_text: min={memory_text.min().item():.3f}, max={memory_text.max().item():.3f}")
-        text_dict["encoded_text"] = memory_text
+                    if hasattr(feat, 'decompose'):
+                        last_feat, _ = feat.decompose()
+                    elif isinstance(feat, tuple):
+                        last_feat = feat[0]
+                    else:
+                        last_feat = feat
+
+                for l in range(len(srcs), self.num_feature_levels):
+                    if l < len(self.input_proj):
+                        if l == num_backbone_levels:
+                            # 从原始特征下采样
+                            src = self.input_proj[l](last_feat)
+                        else:
+                            # 从上一个投影结果下采样（注意这里的 input_proj 可能是下采样层）
+                            src = self.input_proj[l](srcs[-1])
+
+                        # 创建对应的 mask
+                        if len(masks_flat) > 0:
+                            m = masks_flat[-1]
+                            mask = nn.interpolate(m.unsqueeze(1).float(), size=src.shape[-2:]).squeeze(1).bool()
+                        else:
+                            mask = jt.zeros((bs, src.shape[2], src.shape[3]), dtype=jt.bool)
+
+                        srcs.append(src)
+                        masks_flat.append(mask)
+
+            # 展平特征
+            src_flatten = []
+            mask_flatten = []
+            lvl_pos_embed_flatten = []
+            spatial_shapes = []
+            valid_ratios_list = []
+
+            for lvl, (src, mask) in enumerate(zip(srcs, masks_flat)):
+                bs, c, h, w = src.shape
+                spatial_shapes.append((h, w))
+
+                # Calculate valid_ratios before flattening
+                valid_ratios_list.append(self.get_valid_ratio(mask))
+
+                # Generate position embedding
+                pos = self.position_embedding(src, mask)
+
+                src = src.flatten(2).transpose(1, 2)  # [bs, h*w, c]
+                mask = mask.flatten(1)  # [bs, h*w]
+                pos = pos.flatten(2).transpose(1, 2) # [bs, h*w, c]
+
+                # 位置编码
+                pos_embed = pos
+                if self.level_embed is not None:
+                    pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+
+                src_flatten.append(src)
+                mask_flatten.append(mask)
+                lvl_pos_embed_flatten.append(pos_embed)
+
+            src_flatten = jt.concat(src_flatten, dim=1).float32()
+            mask_flatten = jt.concat(mask_flatten, dim=1)
+            lvl_pos_embed_flatten = jt.concat(lvl_pos_embed_flatten, dim=1).float32()
+            spatial_shapes = jt.array(spatial_shapes).int64()
+            level_start_index = jt.concat([
+                jt.zeros((1,), dtype=jt.int64),
+                (spatial_shapes[:, 0] * spatial_shapes[:, 1]).cumsum(0)[:-1]
+            ])
+            # valid_ratios = jt.stack([jt.ones((bs, 2), dtype=jt.float32) for _ in range(len(spatial_shapes))], dim=1)
+            valid_ratios = jt.stack(valid_ratios_list, dim=1).float32()
+
+            # ============================================================
+            # 5. Encoder
+            # ============================================================
+            # print("Entering Encoder...")
+            # print(f"src_flatten dtype: {src_flatten.dtype}")
+            # print(f"src_flatten stats: min={src_flatten.min().item()}, max={src_flatten.max().item()}, mean={src_flatten.mean().item()}")
+            # if jt.any(jt.isnan(src_flatten)) or jt.any(jt.isinf(src_flatten)):
+            #     print("WARNING: src_flatten contains NaN or Inf!")
+
+            # print(f"lvl_pos_embed_flatten dtype: {lvl_pos_embed_flatten.dtype}")
+            # print(f"spatial_shapes dtype: {spatial_shapes.dtype}")
+            # print(f"valid_ratios dtype: {valid_ratios.dtype}")
+            # print(f"valid_ratios values:\n{valid_ratios.numpy()}")
+            # print(f"Input memory_text stats: min={float(text_dict['encoded_text'].min())}, max={float(text_dict['encoded_text'].max())}")
+
+            # Ensure all inputs are float32
+            src_flatten = src_flatten.float32()
+            lvl_pos_embed_flatten = lvl_pos_embed_flatten.float32()
+            valid_ratios = valid_ratios.float32()
+            text_dict["encoded_text"] = text_dict["encoded_text"].float32()
+
+            # Note: encoder expects [bs, sum(hw), c] format (NOT transposed)
+            # PyTorch: text_attention_mask=~text_dict["text_token_mask"]
+            # We need to invert the mask: True means pad (ignore), False means valid
+            memory, memory_text = self.transformer.encoder(
+                src=src_flatten,  # [bs, sum(hw), c]
+                pos=lvl_pos_embed_flatten,  # [bs, sum(hw), c]
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                valid_ratios=valid_ratios,
+                key_padding_mask=mask_flatten,
+                memory_text=text_dict["encoded_text"],
+                text_attention_mask=jt.logical_not(text_dict["text_token_mask"]),  # Invert mask like PyTorch
+                position_ids=text_dict["position_ids"],
+                text_self_attention_masks=text_dict["text_self_attention_masks"],
+            )
+            # print("Encoder finished.")
+
+            # CRITICAL: Update text_dict with encoder-enhanced text features
+            # This is done in PyTorch's Transformer.forward (line 279)
+            # print(f"DEBUG before update: encoded_text min={text_dict['encoded_text'].min().item():.3f}, max={text_dict['encoded_text'].max().item():.3f}")
+            # print(f"DEBUG memory_text: min={memory_text.min().item():.3f}, max={memory_text.max().item():.3f}")
+            text_dict["encoded_text"] = memory_text
         
         # ============================================================
         # 6. Decoder

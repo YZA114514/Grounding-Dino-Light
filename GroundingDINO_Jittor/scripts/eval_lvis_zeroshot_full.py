@@ -74,11 +74,11 @@ def parse_args():
     parser.add_argument('--checkpoint', type=str, 
                         default='weights/groundingdino_swint_ogc_jittor.pkl',
                         help='Path to Jittor checkpoint')
-    parser.add_argument('--lvis_ann', type=str, 
-                        default='data/lvis_notation/lvis_v1_val.json/lvis_v1_val.json',
+    parser.add_argument('--lvis_ann', type=str,
+                        default='../data/lvis_v1_val.json',
                         help='Path to LVIS annotation file')
-    parser.add_argument('--image_dir', type=str, 
-                        default='data/coco/val2017',
+    parser.add_argument('--image_dir', type=str,
+                        default='../val2017',
                         help='Path to COCO val2017 images')
     parser.add_argument('--num_images', type=int, default=100,
                         help='Number of images to evaluate (0 for all)')
