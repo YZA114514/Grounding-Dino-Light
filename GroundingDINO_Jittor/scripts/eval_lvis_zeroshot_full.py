@@ -87,7 +87,7 @@ def parse_args():
                         help='Number of images to evaluate (0 for all)')
     parser.add_argument('--full', action='store_true',
                         help='Evaluate on full validation set')
-    parser.add_argument('--batch_size', type=int, default=80,
+    parser.add_argument('--batch_size', type=int, default=95,
                         help='Number of categories per batch (to fit BERT 512 token limit)')
     parser.add_argument('--num_select', type=int, default=300,
                         help='Number of top predictions to keep per image')
@@ -95,6 +95,14 @@ def parse_args():
                         help='Output directory for results')
     parser.add_argument('--gpu', type=int, default=0,
                         help='GPU device ID')
+    parser.add_argument('--start_idx', type=int, default=0,
+                        help='Starting index for image subset (for multi-GPU parallel processing)')
+    parser.add_argument('--end_idx', type=int, default=None,
+                        help='Ending index for image subset (for multi-GPU parallel processing)')
+    parser.add_argument('--n_gpus', type=int, default=1,
+                        help='Number of GPUs to use in parallel (coordinator mode)')
+    parser.add_argument('--worker_id', type=int, default=0,
+                        help='Worker ID for tqdm position (for multi-GPU display)')
     return parser.parse_args()
 
 
@@ -319,9 +327,153 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
     return results
 
 
+def coordinator_main(args):
+    """Coordinator function that spawns workers for multi-GPU evaluation."""
+    import subprocess
+
+    print(f"Multi-GPU evaluation with {args.n_gpus} GPUs")
+
+    # Load LVIS annotations to get total image count
+    with open(args.lvis_ann, 'r') as f:
+        lvis_data = json.load(f)
+
+    images = {img['id']: img for img in lvis_data['images']}
+    img_to_anns = defaultdict(list)
+    for ann in lvis_data['annotations']:
+        img_to_anns[ann['image_id']].append(ann)
+
+    # Select images with annotations
+    image_ids = [img_id for img_id in images.keys() if img_id in img_to_anns]
+
+    if args.full:
+        args.num_images = len(image_ids)
+    elif args.num_images > 0:
+        image_ids = image_ids[:args.num_images]
+
+    total_images = len(image_ids)
+    chunk_size = total_images // args.n_gpus
+
+    print(f"Total images to evaluate: {total_images}")
+    print(f"Images per GPU: {chunk_size}")
+
+    # Spawn workers
+    procs = []
+    for gpu_id in range(args.n_gpus):
+        start_idx = gpu_id * chunk_size
+        end_idx = start_idx + chunk_size if gpu_id < args.n_gpus - 1 else total_images
+
+        print(f"Spawning GPU {gpu_id}: images [{start_idx}:{end_idx}] ({end_idx - start_idx} images)")
+
+        # Build command for worker
+        cmd = [
+            sys.executable,  # Python executable
+            __file__,        # This script
+            '--gpu', str(gpu_id),
+            '--start_idx', str(start_idx),
+            '--end_idx', str(end_idx),
+            '--worker_id', str(gpu_id),
+            '--output_dir', args.output_dir + f'/gpu{gpu_id}',
+            '--checkpoint', args.checkpoint,
+            '--lvis_ann', args.lvis_ann,
+            '--image_dir', args.image_dir,
+            '--batch_size', str(args.batch_size),
+            '--num_select', str(args.num_select),
+        ]
+
+        if args.full:
+            cmd.append('--full')
+
+        # Spawn worker process (non-blocking)
+        proc = subprocess.Popen(cmd)
+        procs.append(proc)
+
+    print(f"Running {args.n_gpus} workers in parallel...")
+    for p in procs:
+        p.wait()
+
+    print("All workers complete. Merging results...")
+
+    # Merge results from all workers
+    all_predictions = []
+    for gpu_id in range(args.n_gpus):
+        worker_output_dir = args.output_dir + f'/gpu{gpu_id}'
+        worker_pred_file = os.path.join(worker_output_dir, 'lvis_predictions.json')
+
+        if os.path.exists(worker_pred_file):
+            with open(worker_pred_file, 'r') as f:
+                worker_predictions = json.load(f)
+            all_predictions.extend(worker_predictions)
+            print(f"  GPU {gpu_id}: {len(worker_predictions)} predictions")
+        else:
+            print(f"  Warning: No predictions file found for GPU {gpu_id}")
+
+    # Save merged results
+    merged_pred_file = os.path.join(args.output_dir, 'lvis_predictions.json')
+    with open(merged_pred_file, 'w') as f:
+        json.dump(all_predictions, f)
+
+    # Run final evaluation on merged results
+    print(f"\nRunning final evaluation on merged predictions...")
+    with open(args.lvis_ann, 'r') as f:
+        lvis_data = json.load(f)
+
+    images = {img['id']: img for img in lvis_data['images']}
+    categories = lvis_data['categories']
+    img_to_anns = defaultdict(list)
+    for ann in lvis_data['annotations']:
+        img_to_anns[ann['image_id']].append(ann)
+
+    # Select images with annotations
+    image_ids = [img_id for img_id in images.keys() if img_id in img_to_anns]
+    if args.full:
+        args.num_images = len(image_ids)
+    elif args.num_images > 0:
+        image_ids = image_ids[:args.num_images]
+
+    results = evaluate_with_pycocotools(
+        all_predictions, lvis_data, set(image_ids), categories, args.output_dir
+    )
+
+    # Print results
+    print("\n" + "=" * 70)
+    print("EVALUATION RESULTS (True Zero-Shot) - Multi-GPU")
+    print("=" * 70)
+    print(f"  Images evaluated: {len(image_ids)}")
+    print(f"  Categories: {len(categories)} (r:{results['n_rare_cats']}, c:{results['n_common_cats']}, f:{results['n_freq_cats']} with GT)")
+    print("-" * 70)
+    print(f"  AP   (IoU=0.50:0.95): {results['AP']:.1f}%  (target: 25.6%)")
+    print(f"  AP50 (IoU=0.50):      {results['AP50']:.1f}%")
+    print(f"  AP75 (IoU=0.75):      {results['AP75']:.1f}%")
+    print("-" * 70)
+    print(f"  APr  (rare):          {results['APr']:.1f}%  (target: 14.4%)")
+    print(f"  APc  (common):        {results['APc']:.1f}%  (target: 19.6%)")
+    print(f"  APf  (frequent):      {results['APf']:.1f}%  (target: 32.2%)")
+    print("-" * 70)
+    print(f"  APs  (small):         {results['APs']:.1f}%")
+    print(f"  APm  (medium):        {results['APm']:.1f}%")
+    print(f"  APl  (large):         {results['APl']:.1f}%")
+    print("=" * 70)
+
+    # Save results
+    results['num_images'] = len(image_ids)
+    results['n_gpus'] = args.n_gpus
+    results['timestamp'] = datetime.now().isoformat()
+
+    results_file = os.path.join(args.output_dir, 'lvis_zeroshot_results.json')
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\nFinal results saved to: {results_file}")
+
+
 def main():
     args = parse_args()
-    
+
+    # Check if we should run as coordinator (multi-GPU mode)
+    if args.n_gpus > 1:
+        coordinator_main(args)
+        return
+
+    # Single GPU mode (original behavior)
     # Set GPU
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
     
@@ -353,10 +505,15 @@ def main():
         args.num_images = len(image_ids)
     elif args.num_images > 0:
         image_ids = image_ids[:args.num_images]
-    
+
+    # Apply start_idx and end_idx for multi-GPU parallel processing
+    start_idx = args.start_idx
+    end_idx = args.end_idx if args.end_idx is not None else len(image_ids)
+    image_ids = image_ids[start_idx:end_idx]
+
     print(f"  Total images in LVIS val: {len(images)}")
     print(f"  Images with annotations: {len(img_to_anns)}")
-    print(f"  Evaluating on: {len(image_ids)} images")
+    print(f"  Evaluating images [{start_idx}:{end_idx}] (subset: {len(image_ids)} images)")
     print(f"  Total categories: {len(categories)}")
     
     # Load tokenizer and build category batches
@@ -382,7 +539,12 @@ def main():
     all_predictions = []
     SYNC_INTERVAL = 10  # Sync every 10 images instead of every image
 
-    for img_idx, img_id in enumerate(tqdm(image_ids, desc="Processing images")):
+    for img_idx, img_id in enumerate(tqdm(
+        image_ids,
+        desc=f"GPU {args.gpu}",
+        position=args.worker_id,
+        leave=True
+    )):
         img_info = images[img_id]
 
         # Get filename
