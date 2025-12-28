@@ -190,14 +190,17 @@ python scripts/quick_test_zeroshot.py \
 
 ### 快速安装 (推荐方法)
 
+**注意**: 请使用项目根目录 `GroundingDINO-Light/.venv` 中的虚拟环境，而不是 `GroundingDINO_Jittor/.venv`。
+
 如果 conda 创建环境很慢，建议直接使用以下命令：
 
 ```bash
-# 1. 创建基础环境
-conda create -n groundingdino_jittor python=3.19 -y
+# 1. 使用项目根目录的虚拟环境
+cd ..  # 返回到 GroundingDINO-Light 根目录
+source .venv/bin/activate  # 使用根目录的 .venv
 
-# 2. 激活环境
-conda activate groundingdino_jittor
+# 2. 进入 Jittor 项目目录
+cd GroundingDINO_Jittor
 
 # 3. 使用 pip 安装所有依赖 (更快)
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -599,4 +602,8 @@ python -m jittor_implementation.experiments.vlm_comparison \
   --text_prompts "person . dog" "car . bicycle" "cat . bird" \
   --output_dir ./comparison_results \
   --save_visualizations
+```
+```bash
+# Start two gpu run on the whole LVIS/val dataset
+ cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_lvis_zeroshot_full.py --full --n_gpus 2 --checkpoint_interval 500 --image_dir ../val2017 --image_dir_fallback ../train2017 --output_dir outputs/lvis_full_2gpu --resume 2>&1 | tee lvis_eval_fixed.log
 ```

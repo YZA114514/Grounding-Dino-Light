@@ -83,6 +83,8 @@ def parse_args():
     parser.add_argument('--image_dir', type=str,
                         default='../val2017',
                         help='Path to COCO val2017 images')
+    parser.add_argument('--image_dir_fallback', type=str, default='../train2017',
+                        help='Fallback image directory if primary path fails')
     parser.add_argument('--num_images', type=int, default=100,
                         help='Number of images to evaluate (0 for all)')
     parser.add_argument('--full', action='store_true',
@@ -103,7 +105,64 @@ def parse_args():
                         help='Number of GPUs to use in parallel (coordinator mode)')
     parser.add_argument('--worker_id', type=int, default=0,
                         help='Worker ID for tqdm position (for multi-GPU display)')
+    parser.add_argument('--checkpoint_interval', type=int, default=500,
+                        help='Save checkpoint every N images (default: 500)')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from existing checkpoint if available')
     return parser.parse_args()
+
+
+def load_checkpoint(output_dir):
+    """Load checkpoint and return starting index."""
+    progress_file = os.path.join(output_dir, 'progress.json')
+    if os.path.exists(progress_file):
+        with open(progress_file, 'r') as f:
+            progress = json.load(f)
+        start_idx = progress.get('last_idx', 0) + 1
+        timestamp = progress.get('timestamp', 'unknown')
+        print(f"  Found checkpoint: last processed image index {progress.get('last_idx', 0)} (at {timestamp})")
+        print(f"  Resuming from image index {start_idx}")
+        return start_idx
+    return 0
+
+
+def save_checkpoint(output_dir, last_idx):
+    """Save progress checkpoint with atomic write."""
+    progress_file = os.path.join(output_dir, 'progress.json')
+    tmp_file = progress_file + '.tmp'
+
+    progress = {
+        'last_idx': last_idx,
+        'timestamp': datetime.now().isoformat(),
+        'total_processed': last_idx + 1
+    }
+
+    # Atomic write: write to .tmp then rename
+    with open(tmp_file, 'w') as f:
+        json.dump(progress, f, indent=2)
+    os.rename(tmp_file, progress_file)
+
+
+def write_predictions_to_jsonl(output_dir, predictions):
+    """Append predictions to JSONL file."""
+    jsonl_file = os.path.join(output_dir, 'predictions.jsonl')
+    with open(jsonl_file, 'a') as f:
+        for pred in predictions:
+            f.write(json.dumps(pred) + '\n')
+
+
+def load_predictions_from_jsonl(output_dir):
+    """Load all predictions from JSONL file."""
+    jsonl_file = os.path.join(output_dir, 'predictions.jsonl')
+    if not os.path.exists(jsonl_file):
+        return []
+
+    predictions = []
+    with open(jsonl_file, 'r') as f:
+        for line in f:
+            if line.strip():
+                predictions.append(json.loads(line.strip()))
+    return predictions
 
 
 def precompute_text_embeddings(model, batch_info):
@@ -376,12 +435,16 @@ def coordinator_main(args):
             '--checkpoint', args.checkpoint,
             '--lvis_ann', args.lvis_ann,
             '--image_dir', args.image_dir,
+            '--image_dir_fallback', args.image_dir_fallback,
             '--batch_size', str(args.batch_size),
             '--num_select', str(args.num_select),
+            '--checkpoint_interval', str(args.checkpoint_interval),
         ]
 
         if args.full:
             cmd.append('--full')
+        if args.resume:
+            cmd.append('--resume')
 
         # Spawn worker process (non-blocking)
         proc = subprocess.Popen(
@@ -396,21 +459,32 @@ def coordinator_main(args):
 
     print("All workers complete. Merging results...")
 
-    # Merge results from all workers
-    all_predictions = []
-    for gpu_id in range(args.n_gpus):
-        worker_output_dir = args.output_dir + f'/gpu{gpu_id}'
-        worker_pred_file = os.path.join(worker_output_dir, 'lvis_predictions.json')
+    # Merge results from all workers (concatenate JSONL files)
+    merged_jsonl_file = os.path.join(args.output_dir, 'predictions.jsonl')
+    total_predictions = 0
 
-        if os.path.exists(worker_pred_file):
-            with open(worker_pred_file, 'r') as f:
-                worker_predictions = json.load(f)
-            all_predictions.extend(worker_predictions)
-            print(f"  GPU {gpu_id}: {len(worker_predictions)} predictions")
-        else:
-            print(f"  Warning: No predictions file found for GPU {gpu_id}")
+    with open(merged_jsonl_file, 'w') as outfile:
+        for gpu_id in range(args.n_gpus):
+            worker_output_dir = args.output_dir + f'/gpu{gpu_id}'
+            worker_jsonl_file = os.path.join(worker_output_dir, 'predictions.jsonl')
 
-    # Save merged results
+            if os.path.exists(worker_jsonl_file):
+                worker_predictions = 0
+                with open(worker_jsonl_file, 'r') as infile:
+                    for line in infile:
+                        if line.strip():
+                            outfile.write(line)
+                            worker_predictions += 1
+                total_predictions += worker_predictions
+                print(f"  GPU {gpu_id}: {worker_predictions} predictions")
+            else:
+                print(f"  Warning: No predictions file found for GPU {gpu_id}")
+
+    # Convert JSONL to JSON array for evaluation
+    all_predictions = load_predictions_from_jsonl(args.output_dir)
+    print(f"  Total predictions: {total_predictions}")
+
+    # Save merged results in JSON format too
     merged_pred_file = os.path.join(args.output_dir, 'lvis_predictions.json')
     with open(merged_pred_file, 'w') as f:
         json.dump(all_predictions, f)
@@ -531,23 +605,35 @@ def main():
     print(f"\n[3/5] Loading model from {args.checkpoint}...")
     model = load_model(args.checkpoint)
 
+    # Check for existing checkpoint
+    print(f"\n[3.5/5] Checking for checkpoints in {args.output_dir}...")
+    resume_start_idx = 0
+    if args.resume or os.path.exists(os.path.join(args.output_dir, 'progress.json')):
+        resume_start_idx = load_checkpoint(args.output_dir)
+        print(f"  Resuming from image index {resume_start_idx}")
+    else:
+        print("  No checkpoint found, starting fresh")
+
     # Text embeddings will be encoded fresh for each batch (required for proper text-vision fusion)
 
     # Run inference
     print(f"\n[4/5] Running OPTIMIZED inference on {len(image_ids)} images...")
     print(f"  (Vision features cached per image, text encoded fresh per batch)")
     print(f"  (Each image now requires only {len(batch_info)} encoder+decoder passes)")
+    print(f"  (Checkpointing every {args.checkpoint_interval} images)")
 
     start_time = time.time()
-    all_predictions = []
     SYNC_INTERVAL = 10  # Sync every 10 images instead of every image
+    processed_count = 0
 
-    for img_idx, img_id in enumerate(tqdm(
-        image_ids,
-        desc=f"GPU {args.gpu}",
-        position=args.worker_id,
-        leave=True
-    )):
+    # Resume from checkpoint if available
+    remaining_image_ids = image_ids[resume_start_idx:]
+    print(f"  Processing {len(remaining_image_ids)} images (starting from index {resume_start_idx})")
+
+    # Pre-filter to only include images that actually exist
+    print(f"  Pre-filtering images to check which files exist...")
+    existing_image_ids = []
+    for img_id in tqdm(remaining_image_ids, desc="Checking images"):
         img_info = images[img_id]
 
         # Get filename
@@ -559,6 +645,46 @@ def main():
             file_name = f"{img_id:012d}.jpg"
 
         img_path = os.path.join(args.image_dir, file_name)
+
+        # Try fallback directory if primary path fails
+        if not os.path.exists(img_path) and args.image_dir_fallback:
+            img_path = os.path.join(args.image_dir_fallback, file_name)
+
+        if os.path.exists(img_path):
+            existing_image_ids.append(img_id)
+
+    print(f"  Found {len(existing_image_ids)} existing images out of {len(remaining_image_ids)}")
+    remaining_image_ids = existing_image_ids
+
+    if len(remaining_image_ids) == 0:
+        print("  ERROR: No valid images found in specified range!")
+        print(f"  Check that image directory '{args.image_dir}' contains the correct images")
+        print(f"  For LVIS val, you may need to download images to LVIS/val/ directory")
+        sys.exit(1)
+
+    for img_idx, img_id in enumerate(tqdm(
+        remaining_image_ids,
+        initial=resume_start_idx,
+        total=len(image_ids),
+        desc=f"GPU {args.gpu}",
+        position=args.worker_id,
+        leave=True
+    ), start=resume_start_idx):
+        img_info = images[img_id]
+
+        # Get filename
+        if 'file_name' in img_info:
+            file_name = img_info['file_name']
+        elif 'coco_url' in img_info:
+            file_name = img_info['coco_url'].split('/')[-1]
+        else:
+            file_name = f"{img_id:012d}.jpg"
+
+        img_path = os.path.join(args.image_dir, file_name)
+
+        # Try fallback directory if primary path fails
+        if not os.path.exists(img_path) and args.image_dir_fallback:
+            img_path = os.path.join(args.image_dir_fallback, file_name)
 
         if not os.path.exists(img_path):
             continue
@@ -577,25 +703,45 @@ def main():
         # Add image_id to predictions
         for pred in img_preds:
             pred['image_id'] = int(img_id)
-        all_predictions.extend(img_preds)
+
+        # Write predictions to JSONL file
+        write_predictions_to_jsonl(args.output_dir, img_preds)
+        processed_count += 1
+
+        # Save checkpoint every N images
+        if processed_count % args.checkpoint_interval == 0:
+            save_checkpoint(args.output_dir, img_idx)
+            print(f"  Checkpoint saved at image {img_idx + 1}")
 
         # Periodic cleanup (reduced frequency)
-        if (img_idx + 1) % SYNC_INTERVAL == 0:
+        if processed_count % SYNC_INTERVAL == 0:
             jt.sync_all()
             jt.gc()
 
         # Cleanup tensor
         del img_tensor
 
+    # Final checkpoint
+    if processed_count > 0:
+        save_checkpoint(args.output_dir, len(image_ids) - 1)
+        print(f"  Final checkpoint saved")
+
     # Final cleanup
     jt.sync_all()
     jt.gc()
-    
+
     elapsed = time.time() - start_time
     print(f"\n  Inference completed in {elapsed/60:.1f} minutes")
-    print(f"  Average time per image: {elapsed/len(image_ids):.1f} seconds")
+    if processed_count > 0:
+        print(f"  Average time per image: {elapsed/processed_count:.1f} seconds")
+    else:
+        print("  Warning: No images were processed")
+
+    # Load all predictions from JSONL and convert to JSON array
+    print(f"\n  Loading predictions from JSONL file...")
+    all_predictions = load_predictions_from_jsonl(args.output_dir)
     print(f"  Total predictions: {len(all_predictions)}")
-    
+
     # Evaluate
     print(f"\n[5/5] Running COCO-style evaluation...")
     results = evaluate_with_pycocotools(
