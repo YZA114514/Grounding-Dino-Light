@@ -384,7 +384,10 @@ def coordinator_main(args):
             cmd.append('--full')
 
         # Spawn worker process (non-blocking)
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(
+            cmd,
+            env={**os.environ, 'CUDA_VISIBLE_DEVICES': str(gpu_id)}
+        )
         procs.append(proc)
 
     print(f"Running {args.n_gpus} workers in parallel...")
