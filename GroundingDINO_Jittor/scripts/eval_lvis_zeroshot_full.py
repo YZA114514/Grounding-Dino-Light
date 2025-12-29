@@ -73,6 +73,38 @@ else:
     print(f"Using GPU mode (GPU {cuda_visible})")
 
 
+def archive_previous_run(output_dir):
+    """Archive previous run outputs to timestamped folder if they exist."""
+    predictions_file = os.path.join(output_dir, 'predictions.jsonl')
+    progress_file = os.path.join(output_dir, 'progress.json')
+
+    # Check if there's a previous run to archive
+    if os.path.exists(predictions_file) or os.path.exists(progress_file):
+        # Create archive folder with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        archive_dir = os.path.join(output_dir, f'archive_{timestamp}')
+        os.makedirs(archive_dir, exist_ok=True)
+
+        # Move files to archive
+        files_to_archive = [
+            'predictions.jsonl',
+            'progress.json',
+            'lvis_predictions.json',
+            'lvis_zeroshot_results.json'
+        ]
+        moved = []
+        for fname in files_to_archive:
+            src = os.path.join(output_dir, fname)
+            if os.path.exists(src):
+                dst = os.path.join(archive_dir, fname)
+                os.rename(src, dst)
+                moved.append(fname)
+
+        if moved:
+            print(f"  Archived previous run to: {archive_dir}")
+            print(f"  Files moved: {', '.join(moved)}")
+
+
 def setup_logging(output_dir):
     """Set up logging to both console and file."""
     log_file = os.path.join(output_dir, 'eval.log')
@@ -242,7 +274,7 @@ def build_category_batches(categories, tokenizer, batch_size=80, max_text_len=25
     
     return batch_info
 
-
+@profile
 def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=300):
     """Optimized inference using cached projection features and precomputed text embeddings."""
     orig_w, orig_h = orig_size
@@ -272,15 +304,17 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
                 vision_features=projected_features
             )
 
-        pred_logits = outputs['pred_logits'][0].numpy()
-        pred_boxes = outputs['pred_boxes'][0].numpy()
-
-        # Vectorized computation: Convert logits to probabilities and map to labels
-        prob_to_token = 1 / (1 + np.exp(-pred_logits))  # sigmoid
-        prob_to_label = prob_to_token @ positive_map_np.T
+        # Vectorized computation: Convert logits to probabilities and map to labels (GPU sigmoid + bmm):
+        prob_to_token_gpu = jt.sigmoid(outputs['pred_logits'][0])  # GPU sigmoid
+        positive_map_gpu = jt.array(positive_map_np.T).unsqueeze(0)  # (1, 95, num_cats)
+        prob_to_label = jt.nn.bmm(
+            prob_to_token_gpu.unsqueeze(0),  # (1, 900, 95)
+            positive_map_gpu                  # (1, 95, num_cats)
+        ).squeeze(0).numpy()                  # (900, num_cats) → numpy
+        pred_boxes_gpu = outputs['pred_boxes'][0]
 
         # Vectorized filtering and box conversion
-        threshold = 0.001
+        threshold = 0.1
         q_idxs, c_idxs = np.where(prob_to_label >= threshold)
         scores = prob_to_label[q_idxs, c_idxs]
 
@@ -288,7 +322,7 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
             continue
 
         # Vectorized box conversion
-        boxes = pred_boxes[q_idxs]
+        boxes = pred_boxes_gpu[q_idxs].numpy()
         cx, cy, w, h = boxes.T
 
         # Convert to absolute coordinates (vectorized)
@@ -307,14 +341,14 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
         bw = bw[valid]
         bh = bh[valid]
 
-        # Build predictions (vectorized)
+        cat_ids_arr = np.array(batch_cat_ids)[c_idxs]
         batch_preds = [
-            {
-                'category_id': int(batch_cat_ids[c_idx]),
-                'bbox': [float(x), float(y), float(w_), float(h_)],
-                'score': float(score)
-            }
-            for x, y, w_, h_, score, c_idx in zip(x1, y1, bw, bh, scores, c_idxs)
+            {'category_id': cid, 'bbox': box, 'score': sc}
+            for cid, box, sc in zip(
+                cat_ids_arr.tolist(),
+                np.column_stack([x1, y1, bw, bh]).tolist(),
+                scores.tolist()
+            )
         ]
 
         all_predictions.extend(batch_preds)
@@ -426,6 +460,10 @@ def coordinator_main(args):
     import subprocess
 
     print(f"Multi-GPU evaluation with {args.n_gpus} GPUs")
+
+    # Archive previous run (unless resuming)
+    if not args.resume:
+        archive_previous_run(args.output_dir)
 
     # Load LVIS annotations to get total image count
     with open(args.lvis_ann, 'r') as f:
@@ -591,6 +629,10 @@ def main():
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Archive previous run (unless resuming)
+    if not args.resume:
+        archive_previous_run(args.output_dir)
 
     # Setup logging to both console and file
     setup_logging(args.output_dir)
