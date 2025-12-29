@@ -274,7 +274,6 @@ def build_category_batches(categories, tokenizer, batch_size=80, max_text_len=25
     
     return batch_info
 
-@profile
 def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=300):
     """Optimized inference using cached projection features and precomputed text embeddings."""
     orig_w, orig_h = orig_size
@@ -439,6 +438,7 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
         coco_eval_sub.params.catIds = valid_cats
         coco_eval_sub.evaluate()
         coco_eval_sub.accumulate()
+        coco_eval.summarize()
         if len(coco_eval_sub.stats) == 0:
             return 0.0, len(valid_cats)
         return coco_eval_sub.stats[0] * 100, len(valid_cats)
@@ -703,7 +703,6 @@ def main():
     print(f"  (Checkpointing every {args.checkpoint_interval} images)")
 
     start_time = time.time()
-    SYNC_INTERVAL = 20  # Sync every 20 images instead of every image
     processed_count = 0
 
     # Resume from checkpoint if available
@@ -826,11 +825,6 @@ def main():
 
             except Exception as e:
                 logging.warning(f"Failed to compute partial evaluation: {e}")
-
-        # Periodic cleanup (reduced frequency)
-        if processed_count % SYNC_INTERVAL == 0:
-            jt.sync_all()
-            jt.gc()
 
         # Cleanup tensor
         del img_tensor
