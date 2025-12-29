@@ -85,6 +85,8 @@ GroundingDINO_Jittor/jittor_implementation/__pycache__/
 *.jpg
 *.png
 *.jpeg
+*.json
+*.txt
 
 # Obsolete files directory
 dump_obsolete/

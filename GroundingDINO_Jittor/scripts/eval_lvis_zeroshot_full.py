@@ -18,6 +18,7 @@ import sys
 import json
 import argparse
 import time
+import logging
 from datetime import datetime
 
 # Force HuggingFace offline mode (skip network checks for cached models)
@@ -72,9 +73,42 @@ else:
     print(f"Using GPU mode (GPU {cuda_visible})")
 
 
+def setup_logging(output_dir):
+    """Set up logging to both console and file."""
+    log_file = os.path.join(output_dir, 'eval.log')
+
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Remove any existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Create formatters
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_formatter = logging.Formatter('%(message)s')
+
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(file_formatter)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(console_formatter)
+
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    print(f"Logging to: {log_file}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='LVIS Zero-Shot Evaluation')
-    parser.add_argument('--checkpoint', type=str, 
+    parser.add_argument('--checkpoint', type=str,
                         default='weights/groundingdino_swint_ogc_jittor.pkl',
                         help='Path to Jittor checkpoint')
     parser.add_argument('--lvis_ann', type=str,
@@ -105,10 +139,12 @@ def parse_args():
                         help='Number of GPUs to use in parallel (coordinator mode)')
     parser.add_argument('--worker_id', type=int, default=0,
                         help='Worker ID for tqdm position (for multi-GPU display)')
-    parser.add_argument('--checkpoint_interval', type=int, default=500,
-                        help='Save checkpoint every N images (default: 500)')
+    parser.add_argument('--checkpoint_interval', type=int, default=250,
+                        help='Save checkpoint every N images (default: 250)')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from existing checkpoint if available')
+    parser.add_argument('--eval_interval', type=int, default=0,
+                        help='Evaluate AP every N images (0 = disabled, adds overhead)')
     return parser.parse_args()
 
 
@@ -354,9 +390,9 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
     }
     
     # AP by frequency (LVIS-specific)
-    rare_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'r']
-    common_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'c']
-    freq_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'f']
+    rare_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'rare']
+    common_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'common']
+    freq_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'frequent']
     
     gt_cat_set = set(ann['category_id'] for ann in coco_gt_dict['annotations'])
     
@@ -384,7 +420,6 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
     os.remove(gt_file)
     
     return results
-
 
 def coordinator_main(args):
     """Coordinator function that spawns workers for multi-GPU evaluation."""
@@ -553,10 +588,13 @@ def main():
     # Single GPU mode (original behavior)
     # Set GPU
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-    
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
+    # Setup logging to both console and file
+    setup_logging(args.output_dir)
+
     config = Config()
     
     print("=" * 70)
@@ -623,7 +661,7 @@ def main():
     print(f"  (Checkpointing every {args.checkpoint_interval} images)")
 
     start_time = time.time()
-    SYNC_INTERVAL = 10  # Sync every 10 images instead of every image
+    SYNC_INTERVAL = 20  # Sync every 20 images instead of every image
     processed_count = 0
 
     # Resume from checkpoint if available
@@ -712,6 +750,40 @@ def main():
         if processed_count % args.checkpoint_interval == 0:
             save_checkpoint(args.output_dir, img_idx)
             print(f"  Checkpoint saved at image {img_idx + 1}")
+
+        # Real-time AP evaluation (optional, expensive)
+        if args.eval_interval > 0 and processed_count % args.eval_interval == 0 and processed_count > 0:
+            try:
+                # Load current predictions
+                current_predictions = load_predictions_from_jsonl(args.output_dir)
+                # Evaluate on current subset of images processed so far
+                current_image_ids = set(pred['image_id'] for pred in current_predictions)
+
+                # Run evaluation on current predictions
+                partial_results = evaluate_with_pycocotools(
+                    current_predictions, lvis_data, current_image_ids, categories, args.output_dir
+                )
+
+                # Log partial results
+                logging.info(f"[Partial @ {processed_count}/{len(remaining_image_ids)} images] "
+                           f"AP: {partial_results['AP']:.2f}%, "
+                           f"AP50: {partial_results['AP50']:.2f}%, "
+                           f"AP75: {partial_results['AP75']:.2f}%")
+
+                # Save partial results
+                partial_results_file = os.path.join(args.output_dir, f'results_partial_{processed_count:06d}.json')
+                with open(partial_results_file, 'w') as f:
+                    json.dump({
+                        'images_processed': processed_count,
+                        'total_images': len(remaining_image_ids),
+                        'results': partial_results,
+                        'timestamp': datetime.now().isoformat()
+                    }, f, indent=2)
+
+                print(f"  [Partial AP: {partial_results['AP']:.2f}% at {processed_count} images]")
+
+            except Exception as e:
+                logging.warning(f"Failed to compute partial evaluation: {e}")
 
         # Periodic cleanup (reduced frequency)
         if processed_count % SYNC_INTERVAL == 0:
