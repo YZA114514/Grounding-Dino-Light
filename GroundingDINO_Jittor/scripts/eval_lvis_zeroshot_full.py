@@ -390,9 +390,9 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
     }
     
     # AP by frequency (LVIS-specific)
-    rare_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'rare']
-    common_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'common']
-    freq_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'frequent']
+    rare_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'r']
+    common_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'c']
+    freq_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'f']
     
     gt_cat_set = set(ann['category_id'] for ann in coco_gt_dict['annotations'])
     
