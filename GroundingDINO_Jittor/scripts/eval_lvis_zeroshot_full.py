@@ -325,10 +325,20 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
         cx, cy, w, h = boxes.T
 
         # Convert to absolute coordinates (vectorized)
-        x1 = np.clip((cx - w/2) * orig_w, 0, orig_w - w*orig_w)
-        y1 = np.clip((cy - h/2) * orig_h, 0, orig_h - h*orig_h)
-        bw = np.clip(w * orig_w, 0, orig_w - x1)
-        bh = np.clip(h * orig_h, 0, orig_h - y1)
+        x1 = (cx - w/2) * orig_w
+        y1 = (cy - h/2) * orig_h
+        x2 = (cx + w/2) * orig_w
+        y2 = (cy + h/2) * orig_h
+
+        # Clip to image bounds
+        x1 = np.clip(x1, 0, orig_w)
+        y1 = np.clip(y1, 0, orig_h)
+        x2 = np.clip(x2, 0, orig_w)
+        y2 = np.clip(y2, 0, orig_h)
+
+        # Convert to [x, y, w, h] format
+        bw = x2 - x1
+        bh = y2 - y1
 
         # Filter valid boxes
         valid = (bw > 0) & (bh > 0)
@@ -438,7 +448,7 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
         coco_eval_sub.params.catIds = valid_cats
         coco_eval_sub.evaluate()
         coco_eval_sub.accumulate()
-        coco_eval.summarize()
+        coco_eval_sub.summarize()
         if len(coco_eval_sub.stats) == 0:
             return 0.0, len(valid_cats)
         return coco_eval_sub.stats[0] * 100, len(valid_cats)
