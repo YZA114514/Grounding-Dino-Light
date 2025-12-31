@@ -144,8 +144,8 @@ def parse_args():
                         default='weights/groundingdino_swint_ogc_jittor.pkl',
                         help='Path to Jittor checkpoint')
     parser.add_argument('--lvis_ann', type=str,
-                        default='../data/lvis_v1_val.json',
-                        help='Path to LVIS annotation file')
+                        default='../LVIS/minival/lvis_v1_minival.json',
+                        help='Path to LVIS annotation file (default: minival for fair evaluation)')
     parser.add_argument('--image_dir', type=str,
                         default='../LVIS/val',
                         help='Path to LVIS validation images')
