@@ -155,7 +155,7 @@ def parse_args():
                         help='Evaluate on full validation set')
     parser.add_argument('--batch_size', type=int, default=70,
                         help='Number of categories per batch (to fit BERT 512 token limit)')
-    parser.add_argument('--num_select', type=int, default=300,
+    parser.add_argument('--num_select', type=int, default=1000,
                         help='Number of top predictions to keep per image')
     parser.add_argument('--output_dir', type=str, default='outputs',
                         help='Output directory for results')
@@ -217,6 +217,7 @@ def write_predictions_to_jsonl(output_dir, predictions):
     with open(jsonl_file, 'a') as f:
         for pred in predictions:
             f.write(json.dumps(pred) + '\n')
+        f.flush()
 
 
 def load_predictions_from_jsonl(output_dir):
@@ -406,7 +407,7 @@ def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_ca
         q_idxs = indices[0]
         c_idxs = indices[1]
 
-        if len(q_idxs) == 0:
+        if q_idxs.shape[0] == 0:
             continue
 
         scores = prob_to_label_gpu[q_idxs, c_idxs]
@@ -451,7 +452,7 @@ def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_ca
 
     # GPU: top-k selection
     if all_scores.shape[0] > num_select:
-        top_k_idx = jt.argsort(all_scores, descending=True)[:num_select]
+        _, top_k_idx = jt.topk(all_scores, min(num_select, all_scores.shape[0]))
         all_scores = all_scores[top_k_idx]
         all_boxes = all_boxes[top_k_idx]
         all_cat_ids = all_cat_ids[top_k_idx]
