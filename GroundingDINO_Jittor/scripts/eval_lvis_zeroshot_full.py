@@ -806,7 +806,7 @@ def main():
     else:
         start_idx = 0
 
-    print(f"  Total images in LVIS val: {len(images)}")
+    print(f"  Total images in LVIS minival: {len(images)}")
     print(f"  Images with annotations: {len(img_to_anns)}")
     print(f"  Evaluating images [{start_idx}:{start_idx + len(image_ids)}] (subset: {len(image_ids)} images)")
     print(f"  Total categories: {len(categories)}")
@@ -881,8 +881,7 @@ def main():
 
     if len(remaining_image_ids) == 0:
         print("  ERROR: No valid images found in specified range!")
-        print(f"  Check that image directory '{args.image_dir}' contains the correct images")
-        print(f"  For LVIS val, you may need to download images to LVIS/val/ directory")
+        print(f"  Check that image directory '{args.image_dir}' contains the correct lvis/minival images")
         sys.exit(1)
 
     for img_idx, img_id in enumerate(tqdm(
