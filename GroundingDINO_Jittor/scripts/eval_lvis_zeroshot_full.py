@@ -495,103 +495,96 @@ def run_inference_batched(model, img_tensor, batch_info, orig_size, num_select=3
     return run_inference_batched_optimized(model, img_tensor, batch_info, None, orig_size, num_select)
 
 
-def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, output_dir):
-    """Run official COCO-style evaluation."""
-    from pycocotools.coco import COCO
-    from pycocotools.cocoeval import COCOeval
+def evaluate_with_lvis(predictions, lvis_data, image_ids, categories, output_dir):
+    """Run official LVIS evaluation using LVISEval (handles federated annotations correctly)."""
+    from lvis import LVIS, LVISResults, LVISEval
 
-    # Build ground truth in COCO format
-    img_to_anns = defaultdict(list)
-    for ann in lvis_data['annotations']:
-        img_to_anns[ann['image_id']].append(ann)
+    # Build ground truth in LVIS format (use original full annotations)
+    lvis_gt_dict = lvis_data  # Use the original full LVIS data
 
-    # Build annotations list FIRST
-    annotations_list = []
-    ann_id = 1
-    for img_id in image_ids:
-        for ann in img_to_anns.get(img_id, []):
-            annotations_list.append({
-                'id': ann_id,
-                'image_id': ann['image_id'],
-                'category_id': ann['category_id'],
-                'bbox': ann['bbox'],
-                'area': ann['bbox'][2] * ann['bbox'][3],
-                'iscrowd': 0
-            })
-            ann_id += 1
+    # Filter images to our subset
+    subset_images = [img for img in lvis_data['images'] if img['id'] in image_ids]
 
-    # Get categories with GT in this subset
-    gt_cat_ids = set(ann['category_id'] for ann in annotations_list)
+    # Filter annotations to our subset
+    subset_annotations = [ann for ann in lvis_data['annotations'] if ann['image_id'] in image_ids]
 
-    # Build GT dict with ONLY categories that have annotations
-    coco_gt_dict = {
+    # Create subset GT dict
+    lvis_gt_subset = {
         'info': {'description': 'LVIS v1 validation subset', 'date_created': datetime.now().isoformat()},
-        'licenses': [],
-        'images': [img for img in lvis_data['images'] if img['id'] in image_ids],
-        'annotations': annotations_list,
-        'categories': [cat for cat in categories if cat['id'] in gt_cat_ids]  # ← FIXED
+        'licenses': lvis_data.get('licenses', []),
+        'images': subset_images,
+        'annotations': subset_annotations,
+        'categories': categories  # Use all categories (federated annotations)
     }
-    
-    # Save GT and predictions
+
+    # Save subset GT and predictions
     gt_file = os.path.join(output_dir, 'lvis_gt_subset.json')
     pred_file = os.path.join(output_dir, 'lvis_predictions.json')
-    
+
     with open(gt_file, 'w') as f:
-        json.dump(coco_gt_dict, f)
+        json.dump(lvis_gt_subset, f)
     with open(pred_file, 'w') as f:
         json.dump(predictions, f)
-    
-    # Load and evaluate
-    coco_gt = COCO(gt_file)
-    coco_dt = coco_gt.loadRes(pred_file)
-    
-    # Overall AP
-    coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
-    coco_eval.params.imgIds = list(image_ids)
-    coco_eval.evaluate()
-    coco_eval.accumulate()
-    coco_eval.summarize()
-    
-    results = {
-        'AP': coco_eval.stats[0] * 100,
-        'AP50': coco_eval.stats[1] * 100,
-        'AP75': coco_eval.stats[2] * 100,
-        'APs': coco_eval.stats[3] * 100,
-        'APm': coco_eval.stats[4] * 100,
-        'APl': coco_eval.stats[5] * 100,
-    }
-    
-    # AP by frequency (LVIS-specific)
-    rare_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'r']
-    common_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'c']
-    freq_cats = [cat['id'] for cat in categories if cat.get('frequency', 'f') == 'f']
-    
-    gt_cat_set = set(ann['category_id'] for ann in coco_gt_dict['annotations'])
-    
-    def compute_ap_for_cats(cat_ids, name):
-        valid_cats = [c for c in cat_ids if c in gt_cat_set]
-        if not valid_cats:
-            return 0.0, 0
-        coco_eval_sub = COCOeval(coco_gt, coco_dt, 'bbox')
-        coco_eval_sub.params.imgIds = list(image_ids)
-        coco_eval_sub.params.catIds = valid_cats
-        coco_eval_sub.evaluate()
-        coco_eval_sub.accumulate()
-        coco_eval_sub.summarize()
-        if len(coco_eval_sub.stats) == 0:
-            return 0.0, len(valid_cats)
-        return coco_eval_sub.stats[0] * 100, len(valid_cats)
-    
-    results['APr'], n_rare = compute_ap_for_cats(rare_cats, 'rare')
-    results['APc'], n_common = compute_ap_for_cats(common_cats, 'common')
-    results['APf'], n_freq = compute_ap_for_cats(freq_cats, 'frequent')
-    results['n_rare_cats'] = n_rare
-    results['n_common_cats'] = n_common
-    results['n_freq_cats'] = n_freq
-    
+
+    # Load with LVIS API
+    lvis_gt = LVIS(gt_file)
+    lvis_dt = LVISResults(lvis_gt, pred_file)
+
+    # Run evaluation
+    lvis_eval = LVISEval(lvis_gt, lvis_dt, 'bbox')
+    lvis_eval.run()
+    lvis_eval.print_results()
+
+    # Extract results (LVISEval doesn't provide stats array like COCOeval)
+    # We'll parse the printed results or access internal metrics
+    results = {}
+
+    # Get overall metrics
+    if hasattr(lvis_eval, 'results'):
+        overall_results = lvis_eval.results
+        results['AP'] = overall_results.get('AP', 0) * 100
+        results['AP50'] = overall_results.get('AP50', 0) * 100
+        results['AP75'] = overall_results.get('AP75', 0) * 100
+        results['APs'] = overall_results.get('APs', 0) * 100
+        results['APm'] = overall_results.get('APm', 0) * 100
+        results['APl'] = overall_results.get('APl', 0) * 100
+        results['APr'] = overall_results.get('APr', 0) * 100
+        results['APc'] = overall_results.get('APc', 0) * 100
+        results['APf'] = overall_results.get('APf', 0) * 100
+    else:
+        # Fallback: try to access eval's internal state
+        try:
+            results['AP'] = lvis_eval.ap * 100 if hasattr(lvis_eval, 'ap') else 0
+            results['AP50'] = lvis_eval.ap50 * 100 if hasattr(lvis_eval, 'ap50') else 0
+            results['AP75'] = lvis_eval.ap75 * 100 if hasattr(lvis_eval, 'ap75') else 0
+            results['APs'] = lvis_eval.aps * 100 if hasattr(lvis_eval, 'aps') else 0
+            results['APm'] = lvis_eval.apm * 100 if hasattr(lvis_eval, 'apm') else 0
+            results['APl'] = lvis_eval.apl * 100 if hasattr(lvis_eval, 'apl') else 0
+            results['APr'] = lvis_eval.ap_rare * 100 if hasattr(lvis_eval, 'ap_rare') else 0
+            results['APc'] = lvis_eval.ap_common * 100 if hasattr(lvis_eval, 'ap_common') else 0
+            results['APf'] = lvis_eval.ap_freq * 100 if hasattr(lvis_eval, 'ap_freq') else 0
+        except:
+            # Last resort: set to 0 and warn
+            print("Warning: Could not extract detailed metrics from LVISEval, using fallback values")
+            results['AP'] = 0
+            results['AP50'] = 0
+            results['AP75'] = 0
+            results['APs'] = 0
+            results['APm'] = 0
+            results['APl'] = 0
+            results['APr'] = 0
+            results['APc'] = 0
+            results['APf'] = 0
+
+    # Count categories with GT in this subset
+    gt_cat_ids = set(ann['category_id'] for ann in subset_annotations)
+    results['n_rare_cats'] = len([c for c in categories if c['id'] in gt_cat_ids and c.get('frequency') == 'r'])
+    results['n_common_cats'] = len([c for c in categories if c['id'] in gt_cat_ids and c.get('frequency') == 'c'])
+    results['n_freq_cats'] = len([c for c in categories if c['id'] in gt_cat_ids and c.get('frequency') == 'f'])
+
     # Cleanup
     os.remove(gt_file)
-    
+
     return results
 
 def coordinator_main(args):
@@ -721,7 +714,7 @@ def coordinator_main(args):
     elif args.num_images > 0:
         image_ids = image_ids[:args.num_images]
 
-    results = evaluate_with_pycocotools(
+    results = evaluate_with_lvis(
         all_predictions, lvis_data, set(image_ids), categories, args.output_dir
     )
 
@@ -948,7 +941,7 @@ def main():
                 current_image_ids = set(pred['image_id'] for pred in current_predictions)
 
                 # Run evaluation on current predictions
-                partial_results = evaluate_with_pycocotools(
+                partial_results = evaluate_with_lvis(
                     current_predictions, lvis_data, current_image_ids, categories, args.output_dir
                 )
 
@@ -998,8 +991,8 @@ def main():
     print(f"  Total predictions: {len(all_predictions)}")
 
     # Evaluate
-    print(f"\n[5/5] Running COCO-style evaluation...")
-    results = evaluate_with_pycocotools(
+    print(f"\n[5/5] Running LVIS evaluation...")
+    results = evaluate_with_lvis(
         all_predictions, lvis_data, set(image_ids), categories, args.output_dir
     )
     
