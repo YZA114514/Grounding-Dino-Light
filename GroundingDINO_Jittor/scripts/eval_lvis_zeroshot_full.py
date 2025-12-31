@@ -147,16 +147,19 @@ def parse_args():
                         default='../data/lvis_v1_val.json',
                         help='Path to LVIS annotation file')
     parser.add_argument('--image_dir', type=str,
-                        default='../val2017',
-                        help='Path to COCO val2017 images')
+                        default='../LVIS/val',
+                        help='Path to LVIS validation images')
     parser.add_argument('--num_images', type=int, default=100,
                         help='Number of images to evaluate (0 for all)')
     parser.add_argument('--full', action='store_true',
                         help='Evaluate on full validation set')
-    parser.add_argument('--batch_size', type=int, default=70,
+    parser.add_argument('--batch_size', type=int, default=60,
                         help='Number of categories per batch (to fit BERT 512 token limit)')
-    parser.add_argument('--num_select', type=int, default=1000,
-                        help='Number of top predictions to keep per image')
+    parser.add_argument('--box_threshold', type=float,      default=0.3, help='Box score threshold (original: 0.3)')
+    parser.add_argument('--num_select', type=int, default=1000000,
+                        help='[DEPRECATED] Number of top predictions to keep per image. '
+                             'This parameter is obsolete and can harm AP output. '
+                             'It will be removed in future versions.')
     parser.add_argument('--output_dir', type=str, default='outputs',
                         help='Output directory for results')
     parser.add_argument('--gpu', type=int, default=0,
@@ -177,7 +180,21 @@ def parse_args():
                         help='Evaluate AP every N images (0 = disabled, adds overhead)')
     parser.add_argument('--ultra_optimized', action='store_true',
                         help='Use ultra-optimized inference (reduce GPU-CPU syncs from 26 to 2-3 per image)')
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Deprecation warning for num_select
+    if hasattr(args, 'num_select') and args.num_select != 1000000:
+        import warnings
+        warnings.warn(
+            "--num_select is deprecated and can harm AP output. "
+            "The parameter will be removed in future versions. "
+            "All predictions above threshold are now kept by default.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        print("WARNING: --num_select is deprecated. All predictions above threshold will be kept.")
+
+    return args
 
 
 def load_checkpoint(output_dir):
@@ -275,8 +292,11 @@ def build_category_batches(categories, tokenizer, batch_size=60, max_text_len=25
     
     return batch_info
 
-def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=300):
-    """Optimized inference using cached projection features and precomputed text embeddings."""
+def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=None):
+    """Optimized inference using cached projection features and precomputed text embeddings.
+
+    Returns all predictions above threshold. The num_select parameter is deprecated and ignored.
+    """
     orig_w, orig_h = orig_size
     all_predictions = []
 
@@ -314,7 +334,7 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
         pred_boxes_gpu = outputs['pred_boxes'][0]
 
         # Vectorized filtering and box conversion
-        threshold = 0.1
+        threshold = 0.3
         q_idxs, c_idxs = np.where(prob_to_label >= threshold)
         scores = prob_to_label[q_idxs, c_idxs]
 
@@ -363,12 +383,15 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
 
         all_predictions.extend(batch_preds)
 
-    # Keep top-k predictions
+    # Return all predictions above threshold (num_select parameter is deprecated)
     all_predictions.sort(key=lambda x: x['score'], reverse=True)
-    return all_predictions[:num_select]
+    return all_predictions
 
-def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=300):
-    """Ultra-optimized inference: minimize GPU-CPU syncs by keeping everything on GPU until final sync."""
+def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=None):
+    """Ultra-optimized inference: minimize GPU-CPU syncs by keeping everything on GPU until final sync.
+
+    Returns all predictions above threshold. The num_select parameter is deprecated and ignored.
+    """
     orig_w, orig_h = orig_size
 
     # Accumulators (stay on GPU)
@@ -450,13 +473,7 @@ def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_ca
     all_boxes = jt.concat(all_boxes)
     all_cat_ids = jt.concat(all_cat_ids)
 
-    # GPU: top-k selection
-    if all_scores.shape[0] > num_select:
-        _, top_k_idx = jt.topk(all_scores, min(num_select, all_scores.shape[0]))
-        all_scores = all_scores[top_k_idx]
-        all_boxes = all_boxes[top_k_idx]
-        all_cat_ids = all_cat_ids[top_k_idx]
-
+    # Return all predictions above threshold (num_select parameter is deprecated)
     # SINGLE SYNC: transfer all results to CPU
     scores_np = all_scores.numpy()
     boxes_np = all_boxes.numpy()
@@ -482,24 +499,18 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
     """Run official COCO-style evaluation."""
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
-    
+
     # Build ground truth in COCO format
     img_to_anns = defaultdict(list)
     for ann in lvis_data['annotations']:
         img_to_anns[ann['image_id']].append(ann)
-    
-    coco_gt_dict = {
-        'info': {'description': 'LVIS v1 validation subset', 'date_created': datetime.now().isoformat()},
-        'licenses': [],
-        'images': [img for img in lvis_data['images'] if img['id'] in image_ids],
-        'annotations': [],
-        'categories': categories
-    }
-    
+
+    # Build annotations list FIRST
+    annotations_list = []
     ann_id = 1
     for img_id in image_ids:
         for ann in img_to_anns.get(img_id, []):
-            coco_gt_dict['annotations'].append({
+            annotations_list.append({
                 'id': ann_id,
                 'image_id': ann['image_id'],
                 'category_id': ann['category_id'],
@@ -508,6 +519,18 @@ def evaluate_with_pycocotools(predictions, lvis_data, image_ids, categories, out
                 'iscrowd': 0
             })
             ann_id += 1
+
+    # Get categories with GT in this subset
+    gt_cat_ids = set(ann['category_id'] for ann in annotations_list)
+
+    # Build GT dict with ONLY categories that have annotations
+    coco_gt_dict = {
+        'info': {'description': 'LVIS v1 validation subset', 'date_created': datetime.now().isoformat()},
+        'licenses': [],
+        'images': [img for img in lvis_data['images'] if img['id'] in image_ids],
+        'annotations': annotations_list,
+        'categories': [cat for cat in categories if cat['id'] in gt_cat_ids]  # ← FIXED
+    }
     
     # Save GT and predictions
     gt_file = os.path.join(output_dir, 'lvis_gt_subset.json')
