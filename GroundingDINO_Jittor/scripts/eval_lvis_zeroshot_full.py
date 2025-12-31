@@ -292,7 +292,7 @@ def build_category_batches(categories, tokenizer, batch_size=60, max_text_len=25
     
     return batch_info
 
-def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=None):
+def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, box_threshold=0.3, num_select=None):
     """Optimized inference using cached projection features and precomputed text embeddings.
 
     Returns all predictions above threshold. The num_select parameter is deprecated and ignored.
@@ -334,7 +334,7 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
         pred_boxes_gpu = outputs['pred_boxes'][0]
 
         # Vectorized filtering and box conversion
-        threshold = 0.3
+        threshold = box_threshold
         q_idxs, c_idxs = np.where(prob_to_label >= threshold)
         scores = prob_to_label[q_idxs, c_idxs]
 
@@ -387,7 +387,7 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
     all_predictions.sort(key=lambda x: x['score'], reverse=True)
     return all_predictions
 
-def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_cache, orig_size, num_select=None):
+def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_cache, orig_size, box_threshold=0.3, num_select=None):
     """Ultra-optimized inference: minimize GPU-CPU syncs by keeping everything on GPU until final sync.
 
     Returns all predictions above threshold. The num_select parameter is deprecated and ignored.
@@ -425,7 +425,7 @@ def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_ca
         pred_boxes_gpu = outputs['pred_boxes'][0]  # (900, 4)
 
         # GPU: threshold filtering
-        mask = prob_to_label_gpu >= 0.1
+        mask = prob_to_label_gpu >= box_threshold
         indices = jt.where(mask)
         q_idxs = indices[0]
         c_idxs = indices[1]
@@ -825,6 +825,8 @@ def main():
     
     print(f"  Number of batches: {len(batch_info)}")
     print(f"  Max tokens per batch: {max(b['num_tokens'] for b in batch_info)}")
+    # Log positive_map sum for reproducibility verification
+    print(f"  batch_info[0]['positive_map'].sum() = {batch_info[0]['positive_map'].sum()}")
     
     # Load model
     print(f"\n[3/5] Loading model from {args.checkpoint}...")
@@ -921,7 +923,7 @@ def main():
         # Run batched inference with selected optimization level
         img_preds = inference_func(
             model, img_tensor, batch_info, None,  # Text encoded fresh per batch
-            (orig_w, orig_h), args.num_select
+            (orig_w, orig_h), args.box_threshold, args.num_select
         )
 
         # Add image_id to predictions
