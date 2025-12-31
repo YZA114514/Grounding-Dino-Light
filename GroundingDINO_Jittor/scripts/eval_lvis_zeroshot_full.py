@@ -155,7 +155,7 @@ def parse_args():
                         help='Evaluate on full validation set')
     parser.add_argument('--batch_size', type=int, default=60,
                         help='Number of categories per batch (to fit BERT 512 token limit)')
-    parser.add_argument('--box_threshold', type=float,      default=0.3, help='Box score threshold (original: 0.3)')
+    parser.add_argument('--box_threshold', type=float,      default=0.1, help='Box score threshold (original: 0.1)')
     parser.add_argument('--num_select', type=int, default=1000000,
                         help='[DEPRECATED] Number of top predictions to keep per image. '
                              'This parameter is obsolete and can harm AP output. '
@@ -292,7 +292,7 @@ def build_category_batches(categories, tokenizer, batch_size=60, max_text_len=25
     
     return batch_info
 
-def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, box_threshold=0.3, num_select=None):
+def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, orig_size, box_threshold=0.1, num_select=None):
     """Optimized inference using cached projection features and precomputed text embeddings.
 
     Returns all predictions above threshold. The num_select parameter is deprecated and ignored.
@@ -387,7 +387,7 @@ def run_inference_batched_optimized(model, img_tensor, batch_info, text_cache, o
     all_predictions.sort(key=lambda x: x['score'], reverse=True)
     return all_predictions
 
-def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_cache, orig_size, box_threshold=0.3, num_select=None):
+def run_inference_batched_ultra_optimized(model, img_tensor, batch_info, text_cache, orig_size, box_threshold=0.1, num_select=None):
     """Ultra-optimized inference: minimize GPU-CPU syncs by keeping everything on GPU until final sync.
 
     Returns all predictions above threshold. The num_select parameter is deprecated and ignored.
