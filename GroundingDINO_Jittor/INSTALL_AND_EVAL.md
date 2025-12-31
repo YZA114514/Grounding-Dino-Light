@@ -2,14 +2,11 @@
 
 ## 1. 环境安装
 
-### 1.1 Conda 环境创建
+### 1.1 激活.venv环境
 
 ```bash
-# 使用 environment.yml 创建环境
-conda env create -f environment.yml
-
 # 激活环境
-conda activate groundingdino_jittor
+source ./shared-nvme/GroundingDINO-Light/.venv/bin/activate
 ```
 
 ### 1.2 核心依赖说明

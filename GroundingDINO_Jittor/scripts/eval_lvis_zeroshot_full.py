@@ -149,8 +149,6 @@ def parse_args():
     parser.add_argument('--image_dir', type=str,
                         default='../val2017',
                         help='Path to COCO val2017 images')
-    parser.add_argument('--image_dir_fallback', type=str, default='../train2017',
-                        help='Fallback image directory if primary path fails')
     parser.add_argument('--num_images', type=int, default=100,
                         help='Number of images to evaluate (0 for all)')
     parser.add_argument('--full', action='store_true',
@@ -625,7 +623,6 @@ def coordinator_main(args):
             '--checkpoint', args.checkpoint,
             '--lvis_ann', args.lvis_ann,
             '--image_dir', args.image_dir,
-            '--image_dir_fallback', args.image_dir_fallback,
             '--batch_size', str(args.batch_size),
             '--num_select', str(args.num_select),
             '--checkpoint_interval', str(args.checkpoint_interval),
@@ -777,20 +774,24 @@ def main():
     
     # Select images with annotations
     image_ids = [img_id for img_id in images.keys() if img_id in img_to_anns]
-    
-    if args.full:
-        args.num_images = len(image_ids)
+
+    # Apply range selection (start_idx/end_idx takes priority over num_images)
+    if args.start_idx > 0 or args.end_idx is not None:
+        # Explicit range overrides --num_images
+        end_idx = args.end_idx if args.end_idx is not None else len(image_ids)
+        image_ids = image_ids[args.start_idx:end_idx]
+        start_idx = args.start_idx
+    elif args.full:
+        start_idx = 0
     elif args.num_images > 0:
         image_ids = image_ids[:args.num_images]
-
-    # Apply start_idx and end_idx for multi-GPU parallel processing
-    start_idx = args.start_idx
-    end_idx = args.end_idx if args.end_idx is not None else len(image_ids)
-    image_ids = image_ids[start_idx:end_idx]
+        start_idx = 0
+    else:
+        start_idx = 0
 
     print(f"  Total images in LVIS val: {len(images)}")
     print(f"  Images with annotations: {len(img_to_anns)}")
-    print(f"  Evaluating images [{start_idx}:{end_idx}] (subset: {len(image_ids)} images)")
+    print(f"  Evaluating images [{start_idx}:{start_idx + len(image_ids)}] (subset: {len(image_ids)} images)")
     print(f"  Total categories: {len(categories)}")
     
     # Load tokenizer and build category batches
@@ -853,10 +854,6 @@ def main():
 
         img_path = os.path.join(args.image_dir, file_name)
 
-        # Try fallback directory if primary path fails
-        if not os.path.exists(img_path) and args.image_dir_fallback:
-            img_path = os.path.join(args.image_dir_fallback, file_name)
-
         if os.path.exists(img_path):
             existing_image_ids.append(img_id)
 
@@ -888,10 +885,6 @@ def main():
             file_name = f"{img_id:012d}.jpg"
 
         img_path = os.path.join(args.image_dir, file_name)
-
-        # Try fallback directory if primary path fails
-        if not os.path.exists(img_path) and args.image_dir_fallback:
-            img_path = os.path.join(args.image_dir_fallback, file_name)
 
         if not os.path.exists(img_path):
             continue
