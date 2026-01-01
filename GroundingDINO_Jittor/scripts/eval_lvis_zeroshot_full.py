@@ -12,6 +12,9 @@ Usage:
     python scripts/eval_lvis_zeroshot_full.py --num_images 100 --batch_size 60
     python scripts/eval_lvis_zeroshot_full.py --full  # Full validation set (~17K images)
 """
+import sys
+import numpy.core.numeric
+sys.modules['numpy._core.numeric'] = numpy.core.numeric
 
 import os
 import sys
@@ -143,12 +146,14 @@ def parse_args():
     parser.add_argument('--checkpoint', type=str,
                         default='weights/groundingdino_swint_ogc_jittor.pkl',
                         help='Path to Jittor checkpoint')
+    parser.add_argument('--use_full_val', action='store_true',
+                        help='Use full LVIS val set instead of minival (includes COCO training images)')
     parser.add_argument('--lvis_ann', type=str,
-                        default='../LVIS/minival/lvis_v1_minival.json',
-                        help='Path to LVIS annotation file (default: minival for fair evaluation)')
+                        default=None,
+                        help='Path to LVIS annotation file (auto-detected based on --use_full_val)')
     parser.add_argument('--image_dir', type=str,
-                        default='../LVIS/val',
-                        help='Path to LVIS validation images')
+                        default=None,
+                        help='Path to LVIS validation images (auto-detected based on --use_full_val)')
     parser.add_argument('--num_images', type=int, default=100,
                         help='Number of images to evaluate (0 for all)')
     parser.add_argument('--full', action='store_true',
@@ -751,6 +756,20 @@ def coordinator_main(args):
 
 def main():
     args = parse_args()
+
+    # Auto-detect paths based on --use_full_val flag
+    if args.use_full_val:
+        # Use full LVIS val set
+        if args.lvis_ann is None:
+            args.lvis_ann = '../LVIS/lvis_v1_val.json'
+        if args.image_dir is None:
+            args.image_dir = '../LVIS/val'
+    else:
+        # Use minival set (default, fair evaluation)
+        if args.lvis_ann is None:
+            args.lvis_ann = '../LVIS/minival/lvis_v1_minival.json'
+        if args.image_dir is None:
+            args.image_dir = '../LVIS/minival'
 
     # Check if we should run as coordinator (multi-GPU mode)
     if args.n_gpus > 1:
