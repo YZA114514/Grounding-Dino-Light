@@ -167,6 +167,56 @@ max_probs, pred_labels = jt.argmax(pred_probs, dim=-1)
 | **Visualization** | No | Yes |
 | **Official metrics** | Yes | No |
 
+### OWL-ViT Comparison Script
+
+**`eval_owlvit_lvis.py`** - Compare with OWL-ViT baseline model
+
+This script evaluates Google's OWL-ViT model on the same LVIS dataset for direct performance comparison with Grounding DINO.
+
+#### Key Features:
+- Uses HuggingFace `transformers` library for OWL-ViT
+- Processes same LVIS minival dataset (1203 categories)
+- Generates identical output format and metrics as GroundingDINO
+- Enables direct quantitative comparison (AP, APr, APc, APf)
+
+#### Usage:
+```bash
+# Quick test (100 images)
+python scripts/eval_owlvit_lvis.py --num_images 100 --batch_size 25
+
+# Full evaluation
+python scripts/eval_owlvit_lvis.py --full --batch_size 25
+
+# Custom model variant
+python scripts/eval_owlvit_lvis.py \
+    --model_name 'google/owlvit-large-patch14' \
+    --num_images 500 \
+    --output_dir outputs/owlvit_large
+```
+
+#### Test Setup:
+```bash
+# Verify installation and data access
+python scripts/test_owlvit_quick.py
+```
+
+#### Requirements:
+- `transformers >= 4.20.0`
+- `torch >= 1.13.0`
+- `torchvision >= 0.14.0`
+- LVIS dataset (same as GroundingDINO evaluation)
+
+#### Output:
+- `outputs/owlvit/predictions.jsonl` - Incremental predictions
+- `outputs/owlvit/lvis_predictions.json` - Final predictions for LVISEval
+- `outputs/owlvit/lvis_zeroshot_results.json` - Metrics comparable to GroundingDINO
+
+#### When to Use:
+- ✓ Benchmarking against OWL-ViT baseline
+- ✓ VLM performance comparison studies
+- ✓ Understanding open-vocabulary detection capabilities
+- ✓ Research requiring multiple model comparisons
+
 ### Example Usage
 
 ```bash
@@ -606,4 +656,8 @@ python -m jittor_implementation.experiments.vlm_comparison \
 ```bash
 # Start two gpu run on the whole LVIS/val dataset
  cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_lvis_zeroshot_full.py --full --n_gpus 2 --checkpoint_interval 500 --image_dir ../val2017 --image_dir_fallback ../train2017 --output_dir outputs/lvis_full_2gpu --resume 2>&1 | tee lvis_eval_fixed.log
+```
+```bash
+# new startup
+cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_lvis_zeroshot_full.py --num_images 10
 ```
