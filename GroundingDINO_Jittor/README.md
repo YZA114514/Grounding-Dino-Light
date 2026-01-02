@@ -661,3 +661,7 @@ python -m jittor_implementation.experiments.vlm_comparison \
 # new startup
 cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_lvis_zeroshot_full.py --num_images 10
 ```
+```bash
+# new ablation
+source .venv/bin/activate && cd GroundingDINO_Jittor && python scripts/eval_Gdino_ablation.py --ablation no_text_cross_attn --num_images 10
+```
