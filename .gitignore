@@ -90,6 +90,7 @@ GroundingDINO_Jittor/jittor_implementation/__pycache__/
 *.csv
 *.npz
 *.txt
+*.pkl
 
 # Obsolete files directory
 dump_obsolete/
