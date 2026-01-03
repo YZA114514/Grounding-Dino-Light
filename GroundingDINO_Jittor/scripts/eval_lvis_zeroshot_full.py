@@ -19,6 +19,7 @@ sys.modules['numpy._core.numeric'] = numpy.core.numeric
 import os
 import sys
 import json
+import pickle
 import argparse
 import time
 import logging
@@ -66,6 +67,57 @@ from tqdm import tqdm
 from quick_test_zeroshot import load_model, preprocess_image, Config
 from groundingdino.util.vl_utils import build_captions_and_token_span, create_positive_map_from_span
 from transformers import AutoTokenizer
+
+
+def load_finetuned_model(base_checkpoint_path: str, finetuned_checkpoint_path: str):
+    """
+    Load finetuned model by:
+    1. Loading base model (initializes HuggingFace BERT)
+    2. Overlaying finetuned weights
+
+    Args:
+        base_checkpoint_path: Path to original groundingdino_swint_ogc_jittor.pkl
+        finetuned_checkpoint_path: Path to finetuned checkpoint_best.pkl
+
+    Returns:
+        Model with finetuned weights loaded
+    """
+    print(f"Loading base model from {base_checkpoint_path}...")
+    model = load_model(base_checkpoint_path)
+
+    print(f"Loading finetuned weights from {finetuned_checkpoint_path}...")
+    with open(finetuned_checkpoint_path, 'rb') as f:
+        checkpoint = pickle.load(f)
+
+    # Handle both formats: direct state_dict or nested in 'model_state_dict'
+    if 'model_state_dict' in checkpoint:
+        finetuned_state = checkpoint['model_state_dict']
+        print(f"  Checkpoint from epoch {checkpoint.get('epoch', 'unknown')}, "
+              f"loss: {checkpoint.get('loss', 'unknown'):.4f}")
+    else:
+        finetuned_state = checkpoint
+
+    # Get current model state
+    model_state = model.state_dict()
+
+    # Update overlapping weights
+    updated = 0
+    skipped = 0
+    for k, v in finetuned_state.items():
+        if k in model_state:
+            if model_state[k].shape == tuple(v.shape):
+                model_state[k] = jt.array(v)
+                updated += 1
+            else:
+                print(f"  Shape mismatch: {k}: model {model_state[k].shape} vs ckpt {v.shape}")
+                skipped += 1
+        else:
+            skipped += 1
+
+    model.load_state_dict(model_state)
+    print(f"  Updated {updated} weights, skipped {skipped}")
+
+    return model
 
 # Set CUDA flag based on GPU availability
 if cuda_visible == '':
@@ -146,6 +198,11 @@ def parse_args():
     parser.add_argument('--checkpoint', type=str,
                         default='weights/groundingdino_swint_ogc_jittor.pkl',
                         help='Path to Jittor checkpoint')
+    parser.add_argument('--finetuned_checkpoint', type=str, default=None,
+                        help='Path to finetuned checkpoint (will load base + overlay)')
+    parser.add_argument('--base_checkpoint', type=str,
+                        default='GroundingDINO_Jittor/weights/groundingdino_swint_ogc_jittor.pkl',
+                        help='Path to base checkpoint with BERT weights')
     parser.add_argument('--use_full_val', action='store_true',
                         help='Use full LVIS val set instead of minival (includes COCO training images)')
     parser.add_argument('--lvis_ann', type=str,
@@ -841,8 +898,11 @@ def main():
     print(f"  batch_info[0]['positive_map'].sum() = {batch_info[0]['positive_map'].sum()}")
     
     # Load model
-    print(f"\n[3/5] Loading model from {args.checkpoint}...")
-    model = load_model(args.checkpoint)
+    print(f"\n[3/5] Loading model...")
+    if args.finetuned_checkpoint:
+        model = load_finetuned_model(args.base_checkpoint, args.finetuned_checkpoint)
+    else:
+        model = load_model(args.checkpoint)
 
     # Check for existing checkpoint
     print(f"\n[3.5/5] Checking for checkpoints in {args.output_dir}...")
