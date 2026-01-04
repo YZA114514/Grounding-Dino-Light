@@ -123,6 +123,11 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--clip_grad_norm', type=float, default=0.1)
 
+    
+    parser.add_argument('--num_samples', type=int, default=100,
+                        help='Number of samples used for finetuning')
+
+
     # Freeze settings
     parser.add_argument('--freeze_backbone', action='store_true', default=False)
     parser.add_argument('--freeze_text_encoder', action='store_true', default=True)
@@ -134,9 +139,6 @@ def parse_args():
     # Testing
     parser.add_argument('--test_only', action='store_true',
                         help='Only run quick test')
-    parser.add_argument('--num_samples', type=int, default=100,
-                        help='Number of samples for quick test')
-
     return parser.parse_args()
 
 
