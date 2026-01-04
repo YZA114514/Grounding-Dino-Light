@@ -89,10 +89,10 @@ class FinetuneConfig:
     clip_grad_norm = 0.1
 
     # Learning rate schedule
-    warmup_epochs = 0
+    warmup_epochs = 2
 
     # Freeze settings
-    freeze_backbone = True
+    freeze_backbone = False
     freeze_text_encoder = True
 
     # Checkpointing
