@@ -50,6 +50,10 @@ jt.flags.use_cuda = 1
 jt.flags.log_silent = 1  # Suppress [w] warnings
 jt.flags.use_cuda_managed_allocator = 1  # 更激进的内存回收
 
+# MPI 初始化
+if jt.in_mpi:
+    print(f"[Rank {jt.rank}/{jt.world_size}] MPI initialized")
+
 
 # ============================================================
 # Configuration
@@ -85,10 +89,10 @@ class FinetuneConfig:
     clip_grad_norm = 0.1
 
     # Learning rate schedule
-    warmup_epochs = 1
+    warmup_epochs = 0
 
     # Freeze settings
-    freeze_backbone = False
+    freeze_backbone = True
     freeze_text_encoder = True
 
     # Checkpointing
@@ -135,6 +139,10 @@ def parse_args():
     # Multi-GPU
     parser.add_argument('--gpus', type=int, default=1,
                         help='Number of GPUs to use')
+    parser.add_argument('--gpu_rank', type=int, default=0,
+                        help='GPU rank for multi-process training (internal use)')
+    parser.add_argument('--world_size', type=int, default=1,
+                        help='World size for multi-process training (internal use)')
 
     # Testing
     parser.add_argument('--test_only', action='store_true',
@@ -192,9 +200,8 @@ class CachedLVISDataset(Dataset):
 
         self.cache_dir = cache_dir
 
-        # Initialize tokenizer for positive_map computation
-        from transformers import BertTokenizerFast
-        self.tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+        # Initialize tokenizer for positive_map computation (lazy loading)
+        self._tokenizer = None
 
         # Load index
         index_path = os.path.join(cache_dir, 'index.pkl')
@@ -212,6 +219,14 @@ class CachedLVISDataset(Dataset):
 
         self.num_samples = len(self.index)
         print(f"Loaded {self.num_samples} samples from cache")
+
+    @property
+    def tokenizer(self):
+        """Lazy loading of tokenizer to avoid MPI/torch conflicts"""
+        if self._tokenizer is None:
+            from transformers import BertTokenizerFast
+            self._tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+        return self._tokenizer
 
     def __len__(self):
         return self.num_samples
@@ -739,11 +754,13 @@ def freeze_parameters(model, config):
 
 
 def wrap_model(model, num_gpus=1):
-    """Wrap model for multi-GPU training"""
-    if num_gpus > 1:
-        # Jittor DataParallel equivalent
-        model = jt.DataParallel(model, device_ids=list(range(num_gpus)))
-    return model
+    """Jittor MPI multi-GPU wrapper"""
+    if num_gpus > 1 and not jt.in_mpi:
+        raise RuntimeError(
+            f"Multi-GPU requires MPI launch. Use:\n"
+            f"  mpirun -np {num_gpus} python {sys.argv[0]} --gpus {num_gpus} ..."
+        )
+    return model  # Jittor MPI automatically handles gradient synchronization
 
 
 def unwrap_model(model):
@@ -758,7 +775,7 @@ def unwrap_model(model):
 # ============================================================
 
 def train_one_epoch(model, criterion, optimizers, lr_scheduler, dataset,
-                    config, epoch, num_gpus=1):
+                    config, epoch, num_gpus=1, gpu_rank=0, world_size=1):
     """Train for one epoch with gradient accumulation"""
     model.train()
 
@@ -772,10 +789,19 @@ def train_one_epoch(model, criterion, optimizers, lr_scheduler, dataset,
     for opt in optimizers:
         opt.zero_grad()
 
-    # Create batches
+    # Create batches with data sharding
     batch_size = config.batch_size
     num_samples = len(dataset)
-    indices = np.random.permutation(num_samples)
+
+    # Data sharding: each GPU processes a different subset
+    if world_size > 1:
+        all_indices = list(range(num_samples))
+        local_indices = all_indices[gpu_rank::world_size]
+        indices = np.array(local_indices)
+        np.random.shuffle(indices)
+        print(f"[Process {gpu_rank}/{world_size}] Training on {len(indices)} samples (sharded from {num_samples})")
+    else:
+        indices = np.random.permutation(num_samples)
 
     pbar = tqdm(range(0, num_samples, batch_size), desc=f"Epoch {epoch}")
     for batch_idx, batch_start in enumerate(pbar):
@@ -925,7 +951,10 @@ def train_one_epoch(model, criterion, optimizers, lr_scheduler, dataset,
 
 
 def save_checkpoint(model, optimizer, epoch, loss, output_dir, name='checkpoint'):
-    """Save model checkpoint"""
+    """Save model checkpoint (rank 0 only)"""
+    if jt.in_mpi and jt.rank != 0:
+        return None
+
     os.makedirs(output_dir, exist_ok=True)
 
     # Unwrap model for saving
@@ -963,7 +992,10 @@ def save_checkpoint(model, optimizer, epoch, loss, output_dir, name='checkpoint'
 
 
 def save_best_checkpoint(model, optimizer, loss, output_dir):
-    """Save best model checkpoint"""
+    """Save best model checkpoint (rank 0 only)"""
+    if jt.in_mpi and jt.rank != 0:
+        return None
+
     os.makedirs(output_dir, exist_ok=True)
 
     model = unwrap_model(model)
@@ -995,8 +1027,62 @@ def save_best_checkpoint(model, optimizer, loss, output_dir):
 def main():
     args = parse_args()
 
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Multi-GPU validation (process spawning approach)
+    if args.gpus > 1:
+        # Use process spawning instead of MPI for compatibility
+        import subprocess
+
+        print(f"Launching {args.gpus} processes for multi-GPU training...")
+
+        # Spawn worker processes
+        processes = []
+        for gpu_id in range(args.gpus):
+            # Each process gets its own GPU
+            env = os.environ.copy()
+            env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+
+            # Modify args for this process
+            process_args = sys.argv.copy()
+            process_args[process_args.index('--gpus') + 1] = '1'  # Set to single GPU for each process
+            process_args.append(f'--gpu_rank={gpu_id}')
+            process_args.append(f'--world_size={args.gpus}')
+
+            cmd = [sys.executable] + process_args
+            print(f"Starting process {gpu_id}: {' '.join(cmd)}")
+
+            p = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            processes.append(p)
+
+        # Wait for all processes to complete
+        print("Waiting for all processes to complete...")
+        for i, p in enumerate(processes):
+            stdout, _ = p.communicate()
+            print(f"\n=== Process {i} Output ===")
+            print(stdout)
+            if p.returncode != 0:
+                print(f"Process {i} failed with return code {p.returncode}")
+
+        print("All processes completed.")
+        return
+
+    # Only rank 0 creates output directory and prints config
+    if not jt.in_mpi or jt.rank == 0:
+        # Create output directory
+        os.makedirs(args.output_dir, exist_ok=True)
+
+        print("=" * 70)
+        print("Grounding DINO LVIS Fine-tuning v2")
+        if jt.in_mpi:
+            print(f"MPI Distributed: {jt.world_size} GPUs")
+        print("=" * 70)
+        print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Output directory: {args.output_dir}")
 
     # Create config
     config = FinetuneConfig()
@@ -1010,14 +1096,11 @@ def main():
     config.freeze_backbone = args.freeze_backbone
     config.freeze_text_encoder = args.freeze_text_encoder
 
-    print("=" * 70)
-    print("Grounding DINO LVIS Fine-tuning v2")
-    print("=" * 70)
-    print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Output directory: {args.output_dir}")
-    print(f"Batch size: {config.batch_size}, Gradient accumulation: {config.gradient_accumulation}")
-    print(f"Effective batch size: {config.effective_batch_size()}")
-    print(f"Epochs: {config.epochs}, LR: {config.lr}")
+    # Only rank 0 prints config details
+    if not jt.in_mpi or jt.rank == 0:
+        print(f"Batch size: {config.batch_size}, Gradient accumulation: {config.gradient_accumulation}")
+        print(f"Effective batch size: {config.effective_batch_size()}")
+        print(f"Epochs: {config.epochs}, LR: {config.lr}")
 
     # Load dataset
     print("\nLoading cached dataset...")
@@ -1222,7 +1305,7 @@ def main():
         # Train
         train_losses = train_one_epoch(
             model, criterion, optimizers, lr_scheduler,
-            dataloader, config, epoch, args.gpus
+            dataloader, config, epoch, args.gpus, args.gpu_rank, args.world_size
         )
 
         print(f"\nEpoch {epoch} - Train Loss: {train_losses['loss']:.4f}")
