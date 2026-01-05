@@ -1,1 +1,1 @@
-from .backbone import build_backbone
+from .swin_transformer import SwinTransformer

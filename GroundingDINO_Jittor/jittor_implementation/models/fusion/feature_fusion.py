@@ -90,7 +90,7 @@ class FeatureFusion(nn.Module):
                 text_features_norm.transpose(0, 1),  # (L, B, D)
                 text_features_norm.transpose(0, 1),  # (L, B, D)
                 text_features_norm.transpose(0, 1),  # (L, B, D)
-                key_padding_mask=~text_token_mask if text_token_mask is not None else None  # (B, L)
+                key_padding_mask=jt.logical_not(text_token_mask) if text_token_mask is not None else None  # (B, L)
             )[0].transpose(0, 1)  # (B, L, D)
             text_features_norm = text_features_norm + self.dropout(text_features_sa)
             text_features_norm = self.norm1(text_features_norm)
@@ -103,7 +103,7 @@ class FeatureFusion(nn.Module):
             visual_query,  # Query from visual
             text_key_value,  # Key from text
             text_key_value,  # Value from text
-            key_padding_mask=~text_token_mask if text_token_mask is not None else None  # (B, L)
+            key_padding_mask=jt.logical_not(text_token_mask) if text_token_mask is not None else None  # (B, L)
         )[0].transpose(0, 1)  # (B, N, D)
         
         # Residual connection and normalization
@@ -158,7 +158,7 @@ class ContrastiveEmbed(nn.Module):
         if text_token_mask is not None:
             # Set similarity for masked tokens to very negative value
             mask_expanded = text_token_mask.unsqueeze(1)  # (B, 1, L)
-            similarity = similarity * mask_expanded + -1e6 * ~mask_expanded
+            similarity = similarity * mask_expanded + -1e6 * jt.logical_not(mask_expanded)
         
         return similarity
 
@@ -222,7 +222,7 @@ class LanguageGuidedFusion(nn.Module):
             visual_query,  # Query from visual
             text_key_value,  # Key from text
             text_key_value,  # Value from text
-            key_padding_mask=~text_token_mask if text_token_mask is not None else None  # (B, L)
+            key_padding_mask=jt.logical_not(text_token_mask) if text_token_mask is not None else None  # (B, L)
         )[0].transpose(0, 1)  # (B, N, D)
         
         # Residual connection

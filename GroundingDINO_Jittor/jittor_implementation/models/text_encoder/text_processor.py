@@ -12,11 +12,26 @@ class TextProcessor:
     
     def __init__(self, model_name='bert-base-uncased', max_text_len=256):
         super().__init__()
-        self.model_name = model_name
         self.max_text_len = max_text_len
         
+        # Check for local BERT model path
+        import os
+        local_bert_paths = [
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'models', 'bert-base-uncased'),
+            'models/bert-base-uncased',
+            './models/bert-base-uncased',
+        ]
+        
+        actual_model_path = model_name
+        for local_path in local_bert_paths:
+            if os.path.exists(local_path) and os.path.isdir(local_path):
+                actual_model_path = os.path.abspath(local_path)
+                break
+        
+        self.model_name = actual_model_path
+        
         # Initialize tokenizer
-        self.tokenizer = BertTokenizer.from_pretrained(model_name)
+        self.tokenizer = BertTokenizer.from_pretrained(actual_model_path)
         
         # Get special tokens
         self.special_tokens = {
@@ -198,7 +213,8 @@ class TextProcessor:
         
         # Generate attention mask between special tokens
         num_tokens = len(input_ids)
-        attention_mask_matrix = jt.eye(num_tokens, dtype=jt.bool)
+        # attention_mask_matrix = jt.eye(num_tokens, dtype=jt.bool)
+        attention_mask_matrix = (jt.init.eye(num_tokens, dtype=jt.float32) > 0.5)
         position_ids = jt.zeros(num_tokens, dtype=jt.int64)
         cate_to_token_masks = []
         

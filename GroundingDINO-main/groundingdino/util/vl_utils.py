@@ -66,7 +66,8 @@ def build_captions_and_token_span(cat_list, force_lowercase):
         if "/" in class_name:
             class_name_list: List = class_name.strip().split("/")
             class_name_list.append(class_name)
-            class_name: str = random.choice(class_name_list)
+            # Deterministic: always use the complete name (last item)
+            class_name: str = class_name_list[-1]
 
         tokens_positive_i = []
         subnamelist = [i.strip() for i in class_name.strip().split(" ")]

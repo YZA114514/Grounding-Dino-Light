@@ -115,13 +115,26 @@ class ContrastiveEmbed(nn.Module):
         # 计算相似度矩阵
         # x: [bs, nq, d_model], y: [bs, n_text, d_model]
         # res: [bs, nq, n_text]
+        
         res = jt.matmul(x, y.transpose(-1, -2))
         
         # 对padding位置填充-inf
         # text_token_mask: [bs, n_text] -> [bs, 1, n_text]
-        # Jittor 不支持 ~ 操作符，使用 logical_not 或 1 - x
-        mask = (1 - text_token_mask.unsqueeze(1).float()).bool()  # True表示padding
-        res = jt.where(mask, jt.full_like(res, float("-inf")), res)
+        # True 表示有效 token，False 表示 padding
+        # 我们需要掩码 padding 位置，所以取反
+        mask = jt.logical_not(text_token_mask).unsqueeze(1)  # True表示padding
+        
+        # DEBUG
+        # print(f"ContrastiveEmbed: x shape={x.shape}, y shape={y.shape}")
+        # print(f"ContrastiveEmbed: x min={x.min().item():.3f}, max={x.max().item():.3f}")
+        # print(f"ContrastiveEmbed: y min={y.min().item():.3f}, max={y.max().item():.3f}")
+        # print(f"ContrastiveEmbed: res pre-mask min={res.min().item():.3f}, max={res.max().item():.3f}")
+        # print(f"ContrastiveEmbed: mask sum (padding count)={mask.sum().item()}")
+        
+        # Use a large negative number instead of -inf to avoid NaN issues in sigmoid
+        res = jt.where(mask, jt.full_like(res, -1e9), res)
+        
+        # print(f"ContrastiveEmbed: res post-mask min={res.min().item():.3f}, max={res.max().item():.3f}")
 
         # 填充到固定长度
         bs, nq, n_text = res.shape

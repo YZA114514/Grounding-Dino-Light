@@ -81,23 +81,23 @@ def gen_sineembed_for_position(pos_tensor):
     pos_x = x_embed.unsqueeze(-1) / dim_t
     pos_y = y_embed.unsqueeze(-1) / dim_t
     
-    pos_x = jt.stack((jt.sin(pos_x[:, :, 0::2]), jt.cos(pos_x[:, :, 1::2])), dims=3).flatten(2)
-    pos_y = jt.stack((jt.sin(pos_y[:, :, 0::2]), jt.cos(pos_y[:, :, 1::2])), dims=3).flatten(2)
+    pos_x = jt.stack((jt.sin(pos_x[:, :, 0::2]), jt.cos(pos_x[:, :, 1::2])), dim=3).flatten(2)
+    pos_y = jt.stack((jt.sin(pos_y[:, :, 0::2]), jt.cos(pos_y[:, :, 1::2])), dim=3).flatten(2)
     
-    if pos_tensor.size(-1) == 2:
+    if pos_tensor.shape[-1] == 2:
         pos = jt.concat((pos_y, pos_x), dim=2)
-    elif pos_tensor.size(-1) == 4:
+    elif pos_tensor.shape[-1] == 4:
         w_embed = pos_tensor[:, :, 2] * scale
         pos_w = w_embed.unsqueeze(-1) / dim_t
-        pos_w = jt.stack((jt.sin(pos_w[:, :, 0::2]), jt.cos(pos_w[:, :, 1::2])), dims=3).flatten(2)
+        pos_w = jt.stack((jt.sin(pos_w[:, :, 0::2]), jt.cos(pos_w[:, :, 1::2])), dim=3).flatten(2)
 
         h_embed = pos_tensor[:, :, 3] * scale
         pos_h = h_embed.unsqueeze(-1) / dim_t
-        pos_h = jt.stack((jt.sin(pos_h[:, :, 0::2]), jt.cos(pos_h[:, :, 1::2])), dims=3).flatten(2)
+        pos_h = jt.stack((jt.sin(pos_h[:, :, 0::2]), jt.cos(pos_h[:, :, 1::2])), dim=3).flatten(2)
 
         pos = jt.concat((pos_y, pos_x, pos_w, pos_h), dim=2)
     else:
-        raise ValueError(f"Unknown pos_tensor shape(-1): {pos_tensor.size(-1)}")
+        raise ValueError(f"Unknown pos_tensor shape(-1): {pos_tensor.shape[-1]}")
     
     return pos
 
@@ -267,6 +267,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
             tgt2, _ = self.self_attn(q, k, tgt, attn_mask=self_attn_mask)
             tgt = tgt + self.dropout2(tgt2)
             tgt = self.norm2(tgt)
+            # print(f"Self Attn: min={tgt.min()}, max={tgt.max()}, mean={tgt.mean()}")
 
         # 2. 文本交叉注意力（可选）
         if self.use_text_cross_attention and memory_text is not None:
@@ -278,12 +279,13 @@ class DeformableTransformerDecoderLayer(nn.Module):
             )
             tgt = tgt + self.catext_dropout(tgt2)
             tgt = self.catext_norm(tgt)
+            # print(f"Text Cross Attn: min={tgt.min()}, max={tgt.max()}, mean={tgt.mean()}")
 
         # 3. 可变形交叉注意力（与视觉特征）
         # 使用多尺度可变形注意力
         tgt2 = self.cross_attn(
             query=self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
-            reference_points=tgt_reference_points.transpose(0, 1),
+            reference_points=tgt_reference_points.transpose(0, 1).contiguous(),  # IMPORTANT: contiguous like PyTorch
             value=memory.transpose(0, 1),
             spatial_shapes=memory_spatial_shapes,
             level_start_index=memory_level_start_index,
@@ -292,9 +294,11 @@ class DeformableTransformerDecoderLayer(nn.Module):
         
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
+        # print(f"Deformable Cross Attn: min={tgt.min()}, max={tgt.max()}, mean={tgt.mean()}")
 
         # 4. FFN
         tgt = self.forward_ffn(tgt)
+        # print(f"FFN: min={tgt.min()}, max={tgt.max()}, mean={tgt.mean()}")
 
         return tgt
 
@@ -409,6 +413,7 @@ class TransformerDecoder(nn.Module):
         intermediate = []
         reference_points = jt.sigmoid(refpoints_unsigmoid)
         ref_points = [reference_points]
+        # print("Starting Decoder Loop")
 
         for layer_id, layer in enumerate(self.layers):
             # 准备参考点输入
@@ -424,6 +429,7 @@ class TransformerDecoder(nn.Module):
                 reference_points_input = reference_points.unsqueeze(2) * valid_ratios.unsqueeze(0)
             
             # 生成query正弦位置编码
+            # if jt.isnan(reference_points_input).any(): # print(f"Layer {layer_id}: NaN in reference_points_input")
             query_sine_embed = gen_sineembed_for_position(
                 reference_points_input[:, :, 0, :]
             )  # [nq, bs, 256*2]
@@ -434,6 +440,7 @@ class TransformerDecoder(nn.Module):
             query_pos = pos_scale * raw_query_pos
 
             # 解码器层前向传播
+            # print(f"--- Decoder Layer {layer_id} Start ---")
             output = layer(
                 tgt=output,
                 tgt_query_pos=query_pos,
@@ -450,6 +457,8 @@ class TransformerDecoder(nn.Module):
                 self_attn_mask=tgt_mask,
                 cross_attn_mask=memory_mask,
             )
+            # print(f"--- Decoder Layer {layer_id} End ---")
+            # print(f"Layer {layer_id} output: min={output.min()}, max={output.max()}, mean={output.mean()}")
 
             # 迭代式边界框细化
             if self.bbox_embed is not None:

@@ -56,23 +56,53 @@ tmp/
 temp/
 
 # Model checkpoints and weights (uncomment if you don't want to upload large model files)
-# *.pth
-# *.pt
-# *.ckpt
-# *.h5
+ *.pth
+ *.pt
+ *.ckpt
+ *.h5
 
 # Data directories (uncomment if you don't want to upload dataset files)
-# data/
-# datasets/
-# images/
-# annotations/
+ data/
+ datasets/
+ images/
+ annotations/
 
 # Output directories
 output/
 outputs/
 vis/
 subs/
+outputs_*/
 
 assistantdoc/
 
 GroundingDINO_Jittor/weights/
+
+GroundingDINO_Jittor/models/
+GroundingDINO_Jittor/jittor_implementation/__pycache__/
+
+*.zip
+*.tar.gz
+*.jpg
+*.png
+*.jpeg
+*.json
+*.jsonl
+*.csv
+*.npz
+*.txt
+*.pkl
+
+*.pub
+
+# Obsolete files directory
+dump_obsolete/
+
+# Obsolete scripts and docs
+GroundingDINO_Jittor/scripts/finetune_lvis_full.py
+GroundingDINO_Jittor/scripts/quick_test_zeroshot.py
+GroundingDINO_Jittor/scripts/run_inference.py
+GroundingDINO_Jittor/scripts/split_val2017_for_finetuning.py
+GroundingDINO_Jittor/scripts/test_owlvit_quick.py
+GroundingDINO_Jittor/DEBUGGING_STATUS.md
+GroundingDINO_Jittor/FINETUNE_GUIDE.md

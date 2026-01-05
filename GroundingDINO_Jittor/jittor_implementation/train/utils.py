@@ -1,4 +1,4 @@
-# Training Utils (Member C)
+# Training Utils (Member C) - Pure Jittor Implementation
 import os
 import sys
 import time
@@ -9,9 +9,6 @@ from typing import Dict, List, Optional, Union, Tuple
 
 import jittor as jt
 from jittor import nn
-
-import torch
-import torchvision.transforms as T
 from PIL import Image
 
 from .config import TrainingConfig
@@ -23,16 +20,13 @@ def seed_everything(seed: int):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     jt.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
-def save_model(model: nn.Module, optimizer: jt.optim.Optimizer, scheduler: jt.optim.lr_scheduler._LRScheduler,
+def save_model(model: nn.Module, optimizer: jt.optim.Optimizer, scheduler,
                epoch: int, loss: float, output_dir: str, name: str = "model"):
     """Save model checkpoint"""
+    os.makedirs(output_dir, exist_ok=True)
+    
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -41,22 +35,24 @@ def save_model(model: nn.Module, optimizer: jt.optim.Optimizer, scheduler: jt.op
         'loss': loss
     }
     
-    filename = os.path.join(output_dir, f"{name}_{epoch:04d}.pth")
+    filename = os.path.join(output_dir, f"{name}_{epoch:04d}.pkl")
     jt.save(checkpoint, filename)
     
     # Also save as latest
-    latest_filename = os.path.join(output_dir, f"{name}_latest.pth")
+    latest_filename = os.path.join(output_dir, f"{name}_latest.pkl")
     jt.save(checkpoint, latest_filename)
     
+    print(f"Saved checkpoint to {filename}")
     return filename
 
 
-def load_model(model: nn.Module, optimizer: jt.optim.Optimizer = None, scheduler: jt.optim.lr_scheduler._LRScheduler = None,
+def load_model(model: nn.Module, optimizer: jt.optim.Optimizer = None, scheduler = None,
                checkpoint_path: str = None, resume_training: bool = True):
     """Load model checkpoint"""
     if checkpoint_path is None or not os.path.isfile(checkpoint_path):
         return 0, float('inf')
     
+    print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = jt.load(checkpoint_path)
     
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -64,15 +60,16 @@ def load_model(model: nn.Module, optimizer: jt.optim.Optimizer = None, scheduler
     if optimizer is not None and 'optimizer_state_dict' in checkpoint and resume_training:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
-    if scheduler is not None and 'scheduler_state_dict' in checkpoint and resume_training:
+    if scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None and resume_training:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     
-    start_epoch = checkpoint['epoch']
-    loss = checkpoint['loss'] if 'loss' in checkpoint else float('inf')
+    start_epoch = checkpoint.get('epoch', 0)
+    loss = checkpoint.get('loss', float('inf'))
     
     if resume_training:
         start_epoch += 1  # Start from next epoch
     
+    print(f"Loaded checkpoint from epoch {start_epoch - 1}")
     return start_epoch, loss
 
 
@@ -80,27 +77,29 @@ def get_lr(optimizer: jt.optim.Optimizer):
     """Get current learning rate"""
     for param_group in optimizer.param_groups:
         return param_group['lr']
+    return 0.0
 
 
 def is_dist_avail_and_initialized():
     """Check if distributed training is available and initialized"""
-    if not jt.distributed:
+    try:
+        return jt.in_mpi
+    except:
         return False
-    return jt.distributed.is_initialized()
 
 
 def get_world_size():
     """Get world size"""
     if not is_dist_avail_and_initialized():
         return 1
-    return jt.distributed.get_world_size()
+    return jt.world_size
 
 
 def get_rank():
     """Get rank"""
     if not is_dist_avail_and_initialized():
         return 0
-    return jt.distributed.get_rank()
+    return jt.rank
 
 
 def is_main_process():
@@ -124,28 +123,20 @@ def setup_for_distributed(is_master):
 
 
 def init_distributed_mode(args):
-    """Initialize distributed training"""
+    """Initialize distributed training for Jittor"""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
-        args.gpu = int(os.environ['LOCAL_RANK'])
-    elif 'SLURM_PROCID' in os.environ:
-        args.rank = int(os.environ['SLURM_PROCID'])
-        args.gpu = args.rank % torch.cuda.device_count()
+        args.gpu = int(os.environ.get('LOCAL_RANK', 0))
     else:
         print('Not using distributed mode')
         args.distributed = False
         return
 
     args.distributed = True
-
-    torch.cuda.set_device(args.gpu)
-    args.dist_backend = 'nccl'
-    print('| distributed init (rank {}): {}'.format(
-        args.rank, args.dist_url), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
-    torch.distributed.barrier()
+    
+    # Jittor distributed initialization
+    jt.distributed.init(args.rank, args.world_size)
     setup_for_distributed(args.rank == 0)
 
 
@@ -157,7 +148,7 @@ def collate_fn(batch):
 
 
 def _max_by_axis(the_list):
-    # type: (List[List[int]]) -> List[int]
+    """Get max value along each axis"""
     maxes = the_list[0]
     for sublist in the_list[1:]:
         for index, item in enumerate(sublist):
@@ -166,20 +157,10 @@ def _max_by_axis(the_list):
 
 
 class NestedTensor(object):
+    """Container for tensors with masks"""
     def __init__(self, tensors, mask: Optional[jt.Var]):
         self.tensors = tensors
         self.mask = mask
-
-    def to(self, device):
-        # type: (Device) -> NestedTensor # noqa
-        cast_tensor = self.tensors.to(device)
-        mask = self.mask
-        if mask is not None:
-            assert mask is not None
-            cast_mask = mask.to(device)
-        else:
-            cast_mask = None
-        return NestedTensor(cast_tensor, cast_mask)
 
     def decompose(self):
         return self.tensors, self.mask
@@ -189,26 +170,24 @@ class NestedTensor(object):
 
 
 def nested_tensor_from_tensor_list(tensor_list: List[jt.Var]):
-    # TODO: make this more general
+    """Create nested tensor from list of tensors"""
     if tensor_list[0].ndim == 3:
-        # TODO: make it support different-sized images
         max_size = _max_by_axis([list(img.shape) for img in tensor_list])
-        # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
         batch_shape = [len(tensor_list)] + max_size
         b, c, h, w = batch_shape
         dtype = tensor_list[0].dtype
-        device = tensor_list[0].device
         tensor = jt.zeros(batch_shape, dtype=dtype)
         mask = jt.ones((b, h, w), dtype=jt.bool)
-        for img, pad_img, m in zip(tensor_list, tensor, mask):
-            pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-            m[: img.shape[1], : img.shape[2]] = False
+        for i, img in enumerate(tensor_list):
+            tensor[i, : img.shape[0], : img.shape[1], : img.shape[2]] = img
+            mask[i, : img.shape[1], : img.shape[2]] = False
     else:
         raise ValueError('Not supported')
     return NestedTensor(tensor, mask)
 
 
 class MetricLogger(object):
+    """Logger for tracking metrics"""
     def __init__(self, delimiter="\t"):
         self.meters = {}
         self.delimiter = delimiter
@@ -244,64 +223,9 @@ class MetricLogger(object):
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
-        i = 0
-        if not header:
-            header = ''
-        start_time = time.time()
-        end = time.time()
-        iter_time = SmoothedValue(fmt='{avg:.4f}')
-        data_time = SmoothedValue(fmt='{avg:.4f}')
-        space_fmt = ':' + str(len(str(len(iterable)))) + 'd'
-        if torch.cuda.is_available():
-            log_msg = self.delimiter.join([
-                header,
-                '[{0' + space_fmt + '}/{1}]',
-                'eta: {eta}',
-                '{meters}',
-                'time: {time}',
-                'data: {data}',
-                'max mem: {memory:.0f}'
-            ])
-        else:
-            log_msg = self.delimiter.join([
-                header,
-                '[{0' + space_fmt + '}/{1}]',
-                'eta: {eta}',
-                '{meters}',
-                'time: {time}',
-                'data: {data}'
-            ])
-        MB = 1024.0 * 1024.0
-        for obj in iterable:
-            data_time.update(time.time() - end)
-            yield obj
-            iter_time.update(time.time() - end)
-            if i % print_freq == 0 or i == len(iterable) - 1:
-                eta_seconds = iter_time.global_avg * (len(iterable) - i)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
-                else:
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
-            i += 1
-            end = time.time()
-        total_time = time.time() - start_time
-        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(
-            header, total_time_str, total_time / len(iterable)))
-
 
 class SmoothedValue(object):
-    """Track a series of values and provide access to smoothed values over a window or the global series average.
-    """
+    """Track a series of values and provide access to smoothed values over a window."""
 
     def __init__(self, window_size=20, fmt=None):
         if fmt is None:
@@ -320,37 +244,46 @@ class SmoothedValue(object):
         self.count += n
 
     def synchronize_between_processes(self):
-        """
-        Warning: does not synchronize the deque!
-        """
+        """Synchronize between distributed processes"""
         if not is_dist_avail_and_initialized():
             return
         t = jt.array([self.count, self.total])
-        jt.distributed.all_reduce(t)
-        t = t.tolist()
+        # Jittor distributed all_reduce
+        if hasattr(jt, 'mpi_all_reduce'):
+            t = jt.mpi_all_reduce(t)
+        t = t.numpy()
         self.count = int(t[0])
-        self.total = t[1]
+        self.total = float(t[1])
 
     @property
     def median(self):
-        d = jt.array(list(self.deque))
-        return d.median().item()
+        if len(self.deque) == 0:
+            return 0.0
+        d = sorted(self.deque)
+        return d[len(d) // 2]
 
     @property
     def avg(self):
-        d = jt.array(list(self.deque))
-        return d.mean().item()
+        if len(self.deque) == 0:
+            return 0.0
+        return sum(self.deque) / len(self.deque)
 
     @property
     def global_avg(self):
+        if self.count == 0:
+            return 0.0
         return self.total / self.count
 
     @property
     def max(self):
+        if len(self.deque) == 0:
+            return 0.0
         return max(self.deque)
 
     @property
     def value(self):
+        if len(self.deque) == 0:
+            return 0.0
         return self.deque[-1]
 
     def __str__(self):
@@ -377,7 +310,10 @@ def log_images(images: jt.Var, targets: List[Dict], outputs: Dict, output_dir: s
         
         # Draw ground truth boxes
         if i < len(targets) and 'boxes' in targets[i]:
-            for box in targets[i]['boxes'].numpy():
+            boxes = targets[i]['boxes']
+            if isinstance(boxes, jt.Var):
+                boxes = boxes.numpy()
+            for box in boxes:
                 x1, y1, x2, y2 = box.astype(int)
                 img_pil = draw_box(img_pil, (x1, y1, x2, y2), color=(0, 255, 0), width=2)
         
@@ -386,20 +322,26 @@ def log_images(images: jt.Var, targets: List[Dict], outputs: Dict, output_dir: s
             pred_boxes = outputs['pred_boxes'][i]
             pred_logits = outputs['pred_logits'][i]
             
+            if isinstance(pred_boxes, jt.Var):
+                pred_boxes = pred_boxes.numpy()
+            if isinstance(pred_logits, jt.Var):
+                pred_logits = pred_logits.numpy()
+            
             # Apply sigmoid and threshold
-            pred_scores = pred_logits.sigmoid().max(dim=-1)[0]
-            pred_labels = pred_logits.sigmoid().argmax(dim=-1)[0]
+            pred_scores = 1 / (1 + np.exp(-pred_logits))  # sigmoid
+            max_scores = pred_scores.max(axis=-1)
             
             # Keep only predictions with high confidence
-            keep = pred_scores > 0.3
+            keep = max_scores > 0.3
             
-            for box, score, label in zip(pred_boxes[keep], pred_scores[keep], pred_labels[keep]):
-                x1, y1, x2, y2 = box.numpy().astype(int)
-                img_pil = draw_box(img_pil, (x1, y1, x2, y2), color=(255, 0, 0), width=2)
-                
-                # Add label and score
-                text = f"{label.item()}: {score.item():.2f}"
-                img_pil = draw_text(img_pil, (x1, y1 - 5), text, color=(255, 0, 0))
+            for j in range(len(pred_boxes)):
+                if keep[j]:
+                    box = pred_boxes[j]
+                    score = max_scores[j]
+                    x1, y1, x2, y2 = box.astype(int)
+                    img_pil = draw_box(img_pil, (x1, y1, x2, y2), color=(255, 0, 0), width=2)
+                    text = f"{score:.2f}"
+                    img_pil = draw_text(img_pil, (x1, y1 - 5), text, color=(255, 0, 0))
         
         # Save image
         img_path = os.path.join(output_dir, f"{prefix}iter_{iteration:06d}_{i}.jpg")
@@ -436,6 +378,9 @@ def create_logger(log_dir: str, name: str = "training"):
     
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers
+    logger.handlers = []
     
     # Create console handler
     ch = logging.StreamHandler(sys.stdout)
@@ -559,21 +504,3 @@ def create_scheduler(optimizer: jt.optim.Optimizer, config: TrainingConfig):
         scheduler = None
     
     return scheduler
-
-
-def convert_to_jittor_format(data: Dict):
-    """Convert data from PyTorch to Jittor format"""
-    jittor_data = {}
-    
-    for key, value in data.items():
-        if isinstance(value, torch.Tensor):
-            jittor_data[key] = jt.array(value.numpy())
-        elif isinstance(value, list) and len(value) > 0 and isinstance(value[0], torch.Tensor):
-            jittor_data[key] = [jt.array(item.numpy()) for item in value]
-        elif isinstance(value, dict):
-            jittor_data[key] = {k: (jt.array(v.numpy()) if isinstance(v, torch.Tensor) else v) 
-                                for k, v in value.items()}
-        else:
-            jittor_data[key] = value
-    
-    return jittor_data
