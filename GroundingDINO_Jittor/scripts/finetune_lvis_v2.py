@@ -31,11 +31,23 @@ from dataclasses import dataclass
 # Set GPU before importing jittor
 os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def get_project_root():
+    """Get git repository root directory"""
+    import subprocess
+    try:
+        root = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'],
+                                      stderr=subprocess.DEVNULL)
+        return root.decode('utf-8').strip()
+    except:
+        # Fallback to path-based detection (3 levels up from GroundingDINO_Jittor/scripts/)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.dirname(os.path.dirname(current_dir))
+
+PROJECT_ROOT = get_project_root()
 # Add GroundingDINO_Jittor to path for imports
-sys.path.insert(0, os.path.join(BASE_DIR, 'GroundingDINO_Jittor'))
-sys.path.insert(0, os.path.join(BASE_DIR, 'GroundingDINO_Jittor', 'jittor_implementation'))
-sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, 'GroundingDINO_Jittor'))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, 'GroundingDINO_Jittor', 'jittor_implementation'))
+sys.path.insert(0, PROJECT_ROOT)
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -108,7 +120,7 @@ def parse_args():
 
     # Paths
     parser.add_argument('--checkpoint', type=str,
-                        default='GroundingDINO_Jittor/weights/groundingdino_swint_ogc_jittor.pkl',
+                        default=os.path.join(PROJECT_ROOT, 'GroundingDINO_Jittor/weights/groundingdino_swint_ogc_jittor.pkl'),
                         help='Path to pretrained checkpoint')
     parser.add_argument('--cache_dir', type=str,
                         default='data/lvis_finetune_preload_cache_square',
@@ -1114,7 +1126,7 @@ def main():
 
     # Load model
     print("\nLoading model...")
-    checkpoint_path = os.path.join(BASE_DIR, args.checkpoint)
+    checkpoint_path = args.checkpoint
     model = load_model(checkpoint_path)
 
     # Freeze parameters
