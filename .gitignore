@@ -96,3 +96,12 @@ GroundingDINO_Jittor/jittor_implementation/__pycache__/
 
 # Obsolete files directory
 dump_obsolete/
+
+# Obsolete scripts and docs
+GroundingDINO_Jittor/scripts/finetune_lvis_full.py
+GroundingDINO_Jittor/scripts/quick_test_zeroshot.py
+GroundingDINO_Jittor/scripts/run_inference.py
+GroundingDINO_Jittor/scripts/split_val2017_for_finetuning.py
+GroundingDINO_Jittor/scripts/test_owlvit_quick.py
+GroundingDINO_Jittor/DEBUGGING_STATUS.md
+GroundingDINO_Jittor/FINETUNE_GUIDE.md
