@@ -665,3 +665,15 @@ cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_l
 # new ablation
 source .venv/bin/activate && cd GroundingDINO_Jittor && python scripts/eval_Gdino_ablation.py --ablation no_text_cross_attn --num_images 10
 ```
+```bash
+#finetune eval
+python scripts/eval_lvis_zeroshot_full.py     --finetuned_checkpoint ../outputs/test_finetune_square/checkpoint_best.pkl     --base_checkpoint weights/groundingdino_swint_ogc_jittor.pkl     --num_images 100
+
+cd /root/shared-nvme/GroundingDINO-Light/GroundingDINO_Jittor/
+CUDA_VISIBLE_DEVICES=1 python scripts/eval_lvis_zeroshot_full.py \
+  --finetuned_checkpoint ../outputs/finetune_448/checkpoint_best.pkl \
+  --base_checkpoint weights/groundingdino_swint_ogc_jittor.pkl \
+  --num_images 100 \
+  --output_dir ../outputs/eval_finetune_448
+
+```
