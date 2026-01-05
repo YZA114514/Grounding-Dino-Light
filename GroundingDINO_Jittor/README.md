@@ -1,679 +1,482 @@
 # GroundingDINO Jittor Implementation
 
-This project is a Jittor implementation of GroundingDINO, as part of the 2025 Final Project.
+This project is a Jittor implementation of GroundingDINO, as part of the 2025 ANN Final Project (Tsinghua University).
 
-## 🎯 Zero-Shot Evaluation Results
+**Paper**: [Grounding DINO: Marrying DINO with Grounded Pre-Training for Open-Set Object Detection](https://arxiv.org/abs/2303.05499)
 
-Our Jittor implementation achieves comparable performance to the official PyTorch implementation on LVIS zero-shot object detection:
+**Code**: [https://github.com/YZA114514/Grounding-Dino-Light.git](https://github.com/YZA114514/Grounding-Dino-Light.git)
 
-| Metric | Our Result | Paper Target | Status |
-|--------|-----------|--------------|--------|
-| **AP** | 23.5% | 25.6% | ✅ Close |
-| **APr** (rare) | 16.7% | 14.4% | ✅ Exceeded |
-| **APc** (common) | 18.0% | 19.6% | ✅ Close |
-| **APf** (frequent) | 24.1% | 32.2% | ⚠️ In progress |
+## 🎯 Highlights
 
-*Results on 100 images with true zero-shot evaluation (all 1203 LVIS categories)*
+- ✅ **83%+ of original performance**: Achieved **21.4 AP** on LVIS minival (paper: 25.6 AP)
+- ✅ **Pure Jittor implementation**: Multi-scale deformable attention, bi-directional cross-modal attention, BERT encoder
+- ✅ **Complete training pipeline**: Zero-shot evaluation, fine-tuning, ablation studies
+- ✅ **63% inference speedup**: Optimized from 14.8s to 5.5s per image
+
+## 📊 Experimental Results
+
+### Zero-Shot Detection (LVIS minival, 4752 images)
+
+| Metric | Jittor (Ours) | Paper Target | Ratio |
+|--------|--------------|--------------|-------|
+| **AP** | 21.4% | 25.6% | 83.6% |
+| **AP₅₀** | 28.7% | - | - |
+| **APᵣ** (rare) | 12.7% | 14.4% | 88.2% |
+| **APc** (common) | 18.9% | 19.6% | 96.4% |
+| **APf** (frequent) | 25.3% | 32.2% | 78.6% |
+
+### Comparison with OWL-ViT (LVIS minival)
+
+| Method | AP | AP₅₀ | APₛ | APₘ | APₗ | Time/img |
+|--------|-----|------|-----|-----|-----|----------|
+| **Grounding DINO (Jittor)** | **21.4** | **28.7** | **13.7** | **30.5** | **39.1** | 5.5s |
+| OWL-ViT | 17.9 | 28.2 | 9.1 | 24.0 | 35.7 | **2.4s** |
+| **Δ** | **+3.5** | +0.5 | **+4.6** | **+6.5** | +3.4 | - |
+
+**Key findings**:
+- Grounding DINO outperforms OWL-ViT by **+3.5 AP** overall
+- Significant advantage on small/medium objects (**+4.6 / +6.5 AP**) due to multi-scale feature fusion
+- OWL-ViT is 2.3× faster due to single-pass inference
+
+### Fine-tuning Results (100-image subset evaluation)
+
+| Method | AP | AP₅₀ | APᵣ | APc | APf |
+|--------|-----|------|-----|-----|-----|
+| Zero-shot (Jittor) | 36.5 | 47.5 | 16.7 | 22.8 | 38.0 |
+| Fine-tuned (640², 5ep, 1k samples) | **41.4** | **50.1** | **23.3** | **29.1** | **42.8** |
+| *Improvement* | *+4.9* | *+2.6* | *+6.6* | *+6.3* | *+4.8* |
+
+Fine-tuning with just 1k samples improves AP by **+4.9pp**, with rare categories benefiting the most (**+6.6pp**).
+
+### Ablation Study (LVIS minival)
+
+| Setting | AP | AP₅₀ | APᵣ | APc | APf | ΔAP |
+|---------|-----|------|-----|-----|-----|-----|
+| Jittor Baseline | 21.4 | 28.7 | 12.7 | 18.9 | 25.3 | - |
+| w/o text cross-attn | 8.5 | 12.6 | 6.1 | 7.5 | 9.9 | **-60%** |
+| random text | 0.3 | 0.4 | 0.0 | 0.0 | 0.3 | **-99%** |
+
+Removing text cross-attention drops AP by 60%, confirming cross-modal fusion is the core mechanism.
+
+## 🔧 Implementation Highlights
+
+1. **Multi-Scale Deformable Attention**: Pure Jittor implementation using `grid_sample` for bilinear interpolation
+2. **Pure Jittor BERT**: Complete BERT-base architecture compatible with HuggingFace weights
+3. **Weight Mapping**: Handles `module.` prefix removal, `in_proj` splitting (Q/K/V), nested tensor wrappers
+4. **JIT Compilation Fix**: Resolved multi-GPU resource contention via `JT_COMPILE_PARALLEL` limiting
+5. **Category Batching**: 60 categories/batch (~215 tokens) to stay within BERT's 256 token limit
 
 ## Project Structure
 
-The project structure is organized based on the roles and responsibilities defined in the team plan:
-
 ```
 GroundingDINO_Jittor/
-├── jittor_implementation/        # 核心代码库
-│   ├── __init__.py
-│   ├── models/                   # [成员A] 模型架构
-│   │   ├── __init__.py
-│   │   ├── backbone/
-│   │   │   ├── __init__.py
-│   │   │   └── swin_transformer.py
-│   │   ├── attention/
-│   │   │   ├── __init__.py
-│   │   │   └── ms_deform_attn.py
-│   │   ├── transformer/
-│   │   │   ├── __init__.py
-│   │   │   ├── encoder.py
-│   │   │   └── decoder.py
-│   │   ├── head/
-│   │   │   ├── __init__.py
-│   │   │   └── dino_head.py
-│   │   ├── text_encoder/         # [成员C] 文本编码
-│   │   │   ├── __init__.py
-│   │   │   ├── bert_wrapper.py
-│   │   │   └── text_processor.py
-│   │   ├── fusion/               # [成员C] 特征融合
-│   │   │   ├── __init__.py
-│   │   │   └── feature_fusion.py
-│   │   ├── query/                # [成员C] Query生成
-│   │   │   ├── __init__.py
-│   │   │   └── language_guided_query.py
-│   │   ├── groundingdino.py      # [成员A] 完整模型组装
-│   │   └── interfaces.py         # [全体] 接口定义
-│   ├── data/                     # [成员B] 数据处理
-│   │   ├── __init__.py
-│   │   ├── transforms.py         # 数据预处理
-│   │   ├── dataset.py            # 数据集加载 (LVISDataset等)
-│   │   └── sampler.py            # 采样策略
-│   ├── losses/                   # [成员B] 损失函数
-│   │   ├── __init__.py
-│   │   ├── focal_loss.py
-│   │   ├── giou_loss.py
-│   │   ├── l1_loss.py
-│   │   └── grounding_loss.py
-│   ├── eval/                     # [成员B] 评估
-│   │   ├── __init__.py
-│   │   └── lvis_evaluator.py
-│   ├── train/                    # [成员C] 训练相关
-│   │   ├── __init__.py
-│   │   ├── trainer.py
-│   │   ├── config.py
-│   │   └── utils.py
-│   └── experiments/              # [成员C] 实验
-│       ├── __init__.py
-│       └── vlm_comparison.py
-├── scripts/                      # 工具脚本
-│   ├── convert_weights_pytorch_to_jittor.py # 权重转换
-│   ├── eval_lvis_zeroshot_full.py  # LVIS Zero-Shot 完整评估
-│   ├── quick_test_zeroshot.py      # 快速推理测试
-│   ├── run_inference.py            # 推理脚本
-│   ├── finetune.py                 # 微调脚本
-│   ├── coco2odvg.py                # COCO格式转换
-│   └── goldg2odvg.py               # GoldG格式转换
-├── requirements.txt
-└── README.md
-```
-
-## Evaluation Scripts Comparison
-
-This project includes several evaluation scripts with different purposes and trade-offs:
-
-### Script Overview
-
-| Script | Purpose | Zero-Shot | Speed | Use Case |
-|--------|----------|-----------|-------|----------|
-| `eval_lvis_zeroshot_full.py` | Official benchmarking | ✓ True (all 1203 cats) | Slow (~1-5s/img) | Research, papers |
-| `quick_test_zeroshot.py` | Development/testing | ✗ Uses GT | Fast (~0.1-0.5s/img) | Debugging, visualization |
-| `eval_lvis_zeroshot.py` | Alternative evaluation | ✗ Uses GT | Medium | Development |
-| `eval_lvis_zeroshot_final.py` | Debug version | ✗ Partial (25 cats) | Medium | Token mapping debugging |
-
-### Key Differences
-
-#### 1. Category Handling
-
-**`eval_lvis_zeroshot_full.py` (True Zero-Shot)**
-- Processes ALL 1203 LVIS categories in batches (default 80 per batch)
-- Uses PyTorch's `build_captions_and_token_span()` for proper token mapping
-- Multiple forward passes per image (~15 for full evaluation)
-- Results comparable to Grounding DINO paper
-
-**`quick_test_zeroshot.py` (Non-Zero-Shot)**
-- Uses ONLY ground truth categories from each image
-- Typically 2-10 categories per image
-- Single forward pass per image
-- Good for quick sanity checks but NOT for benchmarking
-
-#### 2. Token-to-Category Mapping
-
-**`eval_lvis_zeroshot_full.py`**
-```python
-# Uses positive map matrix from PyTorch utilities
-positive_map = create_positive_map_from_span(tokenized, tokenspanlist, max_text_len)
-prob_to_label = prob_to_token @ positive_map_np.T
-```
-
-**`quick_test_zeroshot.py`**
-```python
-# Simple argmax approach
-pred_probs = jt.sigmoid(pred_logits)
-max_probs, pred_labels = jt.argmax(pred_probs, dim=-1)
-```
-
-#### 3. Evaluation Method
-
-**`eval_lvis_zeroshot_full.py`**
-- Official COCO/LVIS evaluation
-- Full metric suite: AP, AP50, AP75, APs, APm, APl, APr, APc, APf
-- Reproducible and comparable with paper results
-
-**`quick_test_zeroshot.py`**
-- Custom IoU-based TP calculation
-- Simple precision/recall/F1
-- Includes visualization of bounding boxes
-
-### When to Use Which Script?
-
-#### Use `eval_lvis_zeroshot_full.py` when:
-- ✓ Running official benchmarks for research papers
-- ✓ Comparing with Grounding DINO paper metrics
-- ✓ Need all COCO/LVIS metrics
-
-#### Use `quick_test_zeroshot.py` when:
-- ✓ Debugging model inference
-- ✓ Visualizing predictions on sample images
-- ✓ Quick sanity checks during development
-- ✓ Testing model loading and basic functionality
-- ✓ Verifying output format
-
-### Performance Characteristics
-
-| Metric | eval_lvis_zeroshot_full | quick_test_zeroshot |
-|--------|-------------------------|---------------------|
-| **Categories processed** | 1203 | ~5 (GT only) |
-| **Forward passes/image** | ~15 | 1 |
-| **Memory usage** | Higher | Lower |
-| **Time per image** | 1-5 seconds | 0.1-0.5 seconds |
-| **Total time (100 images)** | ~2-8 minutes | ~10-50 seconds |
-| **Visualization** | No | Yes |
-| **Official metrics** | Yes | No |
-
-### OWL-ViT Comparison Script
-
-**`eval_owlvit_lvis.py`** - Compare with OWL-ViT baseline model
-
-This script evaluates Google's OWL-ViT model on the same LVIS dataset for direct performance comparison with Grounding DINO.
-
-#### Key Features:
-- Uses HuggingFace `transformers` library for OWL-ViT
-- Processes same LVIS minival dataset (1203 categories)
-- Generates identical output format and metrics as GroundingDINO
-- Enables direct quantitative comparison (AP, APr, APc, APf)
-
-#### Usage:
-```bash
-# Quick test (100 images)
-python scripts/eval_owlvit_lvis.py --num_images 100 --batch_size 25
-
-# Full evaluation
-python scripts/eval_owlvit_lvis.py --full --batch_size 25
-
-# Custom model variant
-python scripts/eval_owlvit_lvis.py \
-    --model_name 'google/owlvit-large-patch14' \
-    --num_images 500 \
-    --output_dir outputs/owlvit_large
-```
-
-#### Test Setup:
-```bash
-# Verify installation and data access
-python scripts/test_owlvit_quick.py
-```
-
-#### Requirements:
-- `transformers >= 4.20.0`
-- `torch >= 1.13.0`
-- `torchvision >= 0.14.0`
-- LVIS dataset (same as GroundingDINO evaluation)
-
-#### Output:
-- `outputs/owlvit/predictions.jsonl` - Incremental predictions
-- `outputs/owlvit/lvis_predictions.json` - Final predictions for LVISEval
-- `outputs/owlvit/lvis_zeroshot_results.json` - Metrics comparable to GroundingDINO
-
-#### When to Use:
-- ✓ Benchmarking against OWL-ViT baseline
-- ✓ VLM performance comparison studies
-- ✓ Understanding open-vocabulary detection capabilities
-- ✓ Research requiring multiple model comparisons
-
-### Example Usage
-
-```bash
-# True zero-shot evaluation (use for benchmarks)
-python scripts/eval_lvis_zeroshot_full.py --num_images 100 --gpu 0
-
-# Quick testing with visualization (use for debugging)
-python scripts/quick_test_zeroshot.py \
-    --num_images 10 \
-    --output_dir outputs/quick_test \
-    --box_threshold 0.1
+├── jittor_implementation/        # Core codebase
+│   ├── models/                   # Model architecture
+│   │   ├── backbone/             # Swin Transformer
+│   │   ├── attention/            # MS Deformable Attention
+│   │   ├── transformer/          # Encoder & Decoder
+│   │   ├── text_encoder/         # Pure Jittor BERT
+│   │   ├── fusion/               # Bi-directional Cross-Attention
+│   │   ├── query/                # Language-guided Query Selection
+│   │   └── groundingdino.py      # Full model assembly
+│   ├── data/                     # Data loading & transforms
+│   ├── losses/                   # Focal, GIoU, L1, Grounding losses
+│   ├── eval/                     # LVIS evaluator
+│   └── train/                    # Training pipeline
+├── scripts/                      # Utility scripts
+│   ├── eval_lvis_zeroshot_full.py  # Official zero-shot evaluation
+│   ├── finetune_lvis_full.py       # LVIS fine-tuning
+│   ├── eval_owlvit_lvis.py         # OWL-ViT comparison
+│   ├── eval_Gdino_ablation.py      # Ablation experiments
+│   └── convert_weights_pytorch_to_jittor.py
+└── weights/                      # Model checkpoints
 ```
 
 ## Installation
 
-### 前置要求
-
-- Anaconda 或 Miniconda (推荐使用 conda 管理环境)
+### Prerequisites
 - Python 3.9
-- CUDA (可选，用于 GPU 加速)
+- CUDA 11.x (for GPU acceleration)
+- PyTorch (for weight conversion only)
 
-### 快速安装 (推荐方法)
-
-**注意**: 请使用项目根目录 `GroundingDINO-Light/.venv` 中的虚拟环境，而不是 `GroundingDINO_Jittor/.venv`。
-
-如果 conda 创建环境很慢，建议直接使用以下命令：
+### Step 1: Clone and Setup Environment
 
 ```bash
-# 1. 使用项目根目录的虚拟环境
-cd ..  # 返回到 GroundingDINO-Light 根目录
-source .venv/bin/activate  # 使用根目录的 .venv
+# Clone repository
+git clone https://github.com/YZA114514/Grounding-Dino-Light.git
+cd Grounding-Dino-Light
 
-# 2. 进入 Jittor 项目目录
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# or: .venv\Scripts\activate  # Windows
+
+# Install dependencies
 cd GroundingDINO_Jittor
-
-# 3. 使用 pip 安装所有依赖 (更快)
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 4. 验证安装
+# Verify installation
 python -c "import jittor as jt; print(f'Jittor: {jt.__version__}')"
-python -c "import torch, transformers, timm, pycocotools; print('所有依赖安装成功!')"
 ```
 
-### 使用 Conda 环境文件 (较慢)
+### Step 2: Download and Setup BERT Model
 
-如果网络较好，可以使用：
+BERT 模型用于文本编码，需要从 HuggingFace 下载 `bert-base-uncased`：
 
 ```bash
-# 配置国内镜像源 (加速)
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free
+# 方法1: 使用 transformers 自动下载（推荐）
+python -c "from transformers import AutoTokenizer, AutoModel; \
+    AutoTokenizer.from_pretrained('bert-base-uncased'); \
+    AutoModel.from_pretrained('bert-base-uncased')"
 
-# 创建环境
-conda env create -f environment.yml
-
-# 激活环境
-conda activate groundingdino_jittor
+# 方法2: 手动下载并放置到指定目录
+# 下载地址: https://huggingface.co/bert-base-uncased
+# 放置位置: GroundingDINO_Jittor/models/bert-base-uncased/
+#   - config.json
+#   - vocab.txt
+#   - pytorch_model.bin (或 model.safetensors)
 ```
 
-### 主要依赖
+下载完成后，设置离线模式以加速推理：
+```bash
+export HF_HUB_OFFLINE=1  # Linux/Mac
+# 或 Windows: set HF_HUB_OFFLINE=1
+```
 
-- **jittor** >= 1.3.0 - 核心深度学习框架
-- **torch** >= 1.13.0 - 用于 BERT 模型和权重转换
-- **transformers** >= 4.20.0 - BERT 文本编码器
-- **timm** >= 0.6.0 - Swin Transformer backbone
-- **pycocotools** >= 2.0.4 - LVIS/COCO 评估
-- numpy, pillow, matplotlib - 数据处理和可视化
+### Step 3: Download and Convert Official Weights
 
-### 常见问题
-
-- **conda 命令找不到**: 使用 Anaconda Prompt (Windows) 或重启终端
-- **环境创建失败**: 检查网络连接，或手动创建环境后使用 `pip install -r requirements.txt`
-- **GPU 支持**: Jittor 会自动检测 CUDA，无需手动配置
-
-## Quick Start - Inference
-
-### 1. 下载预训练权重
-
-从官方 GitHub 下载 PyTorch 预训练权重：
+从官方仓库下载 PyTorch 预训练权重，并转换为 Jittor 格式：
 
 ```bash
-# 创建 weights 目录
-mkdir weights
-cd weights
+# 创建权重目录
+mkdir -p weights && cd weights
 
-# 下载 Swin-T 版本权重 (~694MB)
-# 方法1: 使用 wget (Linux/Mac)
+# 下载 Swin-T 官方权重 (~694MB)
 wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
 
-# 方法2: 使用浏览器直接下载
-# 访问: https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
-
+# 返回项目目录
 cd ..
-```
 
-### 2. 转换权重到 Jittor 格式
-
-```bash
+# 转换为 Jittor 格式 (需要安装 PyTorch)
 python scripts/convert_weights_pytorch_to_jittor.py \
     --pytorch_weight weights/groundingdino_swint_ogc.pth \
-    --output weights/groundingdino_swint_ogc_jittor.pkl
+    --output weights/groundingdino_swint_ogc_jittor.pkl \
+    --verify
 ```
 
-转换成功后会显示：
-```
-成功加载 940 个权重
-成功保存 940 个权重
-转换完成！
-```
-### 下载bert模型放在Grounding-Dino-Light/GroundingDINO_Jittor/models
-### 下载数据到Grounding-Dino-Light/GroundingDINO_Jittor/data/coco/val2017；Grounding-Dino-Light/GroundingDINO_Jittor/data/lvis_notation
+转换脚本功能：
+- 加载 PyTorch 权重 (.pth)
+- 处理权重名称映射（移除 `module.` 前缀、拆分 `in_proj` 权重）
+- 转换为 Jittor 格式 (.pkl)
+- 验证转换正确性
 
-### 3. 运行推理
+### Step 4: Download LVIS Dataset
 
-#### 演示模式（自动创建测试图像）
+LVIS 数据集用于零样本评估和微调：
 
 ```bash
+# 创建数据目录
+mkdir -p ../LVIS/minival
+
+# 下载 LVIS minival 标注文件
+# 官方地址: https://www.lvisdataset.org/dataset
+# 放置位置: ../LVIS/minival/lvis_v1_minival.json
+
+# 下载 COCO 2017 验证集图像 (~1GB)
+# 官方地址: https://cocodataset.org/#download
+# 放置位置: ../LVIS/minival/ (符号链接或复制相关图像)
+```
+
+数据集目录结构：
+```
+../LVIS/
+├── minival/
+│   ├── lvis_v1_minival.json     # LVIS minival 标注
+│   └── *.jpg                     # COCO val2017 图像
+└── lvis_v1_val.json             # (可选) 完整 LVIS 验证集标注
+```
+
+**注意**: minival 是 LVIS 验证集的子集 (4,752 张图像)，排除了与 COCO 2017 训练集重叠的样本，用于公平评估。
+
+## Quick Start
+
+### Inference Demo
+
+```bash
+# Demo mode (使用内置测试图像)
 python scripts/run_inference.py --demo
-```
 
-#### 自定义图像推理
-
-```bash
+# Custom image (自定义图像和文本)
 python scripts/run_inference.py \
     --image your_image.jpg \
     --text "cat . dog . person ." \
-    --output result.jpg
-```
-
-#### 完整参数
-
-```bash
-python scripts/run_inference.py \
-    --image <图像路径> \
-    --text <文本提示，用 . 分隔不同类别> \
-    --output <输出路径> \
-    --box_threshold 0.35 \
-    --text_threshold 0.25
-```
-
-### LVIS Zero-Shot Evaluation
-
-Run the full zero-shot evaluation on LVIS dataset:
-
-```bash
-# Quick test on 100 images
-python scripts/eval_lvis_zeroshot_full.py --num_images 100 --gpu 0
-
-# Full validation set (~17K images, ~85 hours)
-python scripts/eval_lvis_zeroshot_full.py --full --gpu 0
-
-# Custom parameters
-python scripts/eval_lvis_zeroshot_full.py \
-    --num_images 500 \
-    --batch_size 80 \
-    --checkpoint weights/groundingdino_swint_ogc_jittor.pkl \
-    --lvis_ann data/lvis_notation/lvis_v1_val.json/lvis_v1_val.json \
-    --image_dir data/coco/val2017 \
-    --output_dir outputs
-```
-
-### LVIS Fine-tuning
-
-Fine-tune Grounding DINO on LVIS dataset to achieve **AP 52.1** (target from paper):
-
-```bash
-# Quick test (verify script works)
-python scripts/finetune_lvis_full.py --test_only --num_samples 10 --epochs 2 --gpu 0
-
-# Full fine-tuning (recommended settings from paper)
-python scripts/finetune_lvis_full.py \
-    --epochs 20 \
-    --batch_size 4 \
-    --lr 1e-4 \
-    --lr_backbone 1e-5 \
-    --lr_drop 15 \
-    --output_dir outputs/finetune_lvis \
-    --gpu 0
-
-# With frozen backbone (faster, less memory)
-python scripts/finetune_lvis_full.py \
-    --epochs 20 \
-    --batch_size 8 \
-    --freeze_backbone \
-    --output_dir outputs/finetune_frozen_backbone \
-    --gpu 0
-```
-
-**Fine-tuning Targets:**
-
-| Metric | Target |
-|--------|--------|
-| AP | 52.1% |
-| APr (rare) | 35.4% |
-| APc (common) | 51.3% |
-| APf (frequent) | 55.7% |
-
-**Training Notes:**
-- Full training on LVIS (~100K images) takes approximately 40-60 hours on a single GPU
-- Recommended: Use multi-GPU training or freeze backbone to reduce training time
-- Learning rate drops by 10x at epoch 15 (configurable via `--lr_drop`)
-- Checkpoints saved every 5 epochs and at best validation loss
-
-### 推理示例
-
-```python
-from jittor_implementation.util.inference import GroundingDINOInference
-
-# 初始化模型
-model = GroundingDINOInference(
-    weight_path="weights/groundingdino_swint_ogc_jittor.pkl",
-    device="cuda",
-    box_threshold=0.35,
-    text_threshold=0.25,
-)
-
-# 执行推理
-boxes, scores, phrases = model.predict(
-    image="path/to/image.jpg",
-    caption="cat . dog . person ."
-)
-
-# 推理并可视化
-result_image = model.predict_and_visualize(
-    image_path="path/to/image.jpg",
-    caption="cat . dog . person .",
-    output_path="output.jpg"
-)
+    --output result.jpg \
+    --box_threshold 0.3
 ```
 
 ---
 
-## Usage
+## 🔬 实验运行指南
 
-### Data Loading
+### 1. Zero-Shot 评估 (LVIS)
 
-```python
-from jittor_implementation.data import build_dataset, get_dataloader
-
-# Build dataset
-dataset = build_dataset('train', args)
-
-# Create dataloader with LVIS sampler
-dataloader = get_dataloader(
-    dataset, 
-    batch_size=4, 
-    sampler_type='lvis',
-    sampler_kwargs={'samples_per_epoch': 1000}
-)
-```
-
-### Loss Functions
-
-```python
-from jittor_implementation.losses import GroundingLoss, SetCriterion
-
-# Create loss function
-criterion = SetCriterion(
-    num_classes=1203,
-    weight_dict={'loss_ce': 2.0, 'loss_bbox': 5.0, 'loss_giou': 2.0},
-    losses=['labels', 'boxes', 'giou']
-)
-
-# Calculate loss
-outputs = model(images)
-losses = criterion(outputs, targets)
-```
-
-### Evaluation
-
-```python
-from jittor_implementation.eval import evaluate_lvis
-
-# Evaluate model
-metrics = evaluate_lvis(
-    model, 
-    dataloader, 
-    ann_file='path/to/lvis_val.json',
-    output_dir='./eval_results'
-)
-
-print(f"AP: {metrics['AP']:.4f}")
-```
-
-### Data Format Conversion
+使用 `eval_lvis_zeroshot_full.py` 进行零样本检测评估：
 
 ```bash
-# Convert COCO to ODVG
-python scripts/coco2odvg.py --coco_path path/to/coco.json --output_path path/to/odvg.json --image_dir path/to/images
+# 快速测试 (100 张图像, ~5 分钟)
+python scripts/eval_lvis_zeroshot_full.py \
+    --num_images 100 \
+    --gpu 0 \
+    --output_dir outputs/zeroshot_test
 
-# Convert GoldG to ODVG
-python scripts/goldg2odvg.py --goldg_path path/to/goldg.json --output_path path/to/odvg.json --image_dir path/to/images
+# 完整 LVIS minival 评估 (4752 张图像, ~7 小时)
+python scripts/eval_lvis_zeroshot_full.py \
+    --full \
+    --gpu 0 \
+    --output_dir outputs/zeroshot_full
+
+# 使用超优化模式 (减少 GPU-CPU 同步, 提升 15-25%)
+python scripts/eval_lvis_zeroshot_full.py \
+    --full \
+    --ultra_optimized \
+    --gpu 0
+
+# 断点续传 (从中断处继续)
+python scripts/eval_lvis_zeroshot_full.py \
+    --full \
+    --resume \
+    --output_dir outputs/zeroshot_full
 ```
 
-### Text Encoding
+**主要参数说明**:
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--checkpoint` | Jittor 权重路径 | `weights/groundingdino_swint_ogc_jittor.pkl` |
+| `--num_images` | 评估图像数量 | 100 |
+| `--full` | 评估完整 minival | False |
+| `--batch_size` | 类别批大小 (BERT token 限制) | 60 |
+| `--box_threshold` | 置信度阈值 | 0.1 |
+| `--ultra_optimized` | 启用超优化模式 | False |
+| `--resume` | 断点续传 | False |
+| `--checkpoint_interval` | 保存检查点间隔 | 250 |
 
-```python
-from jittor_implementation.models.text_encoder import BERTWrapper
+### 2. 微调 (Fine-tuning)
 
-# Initialize text encoder
-text_encoder = BERTWrapper(
-    model_name='bert-base-uncased',
-    max_text_len=256
-)
-
-# Process text
-text = ["person . dog . cat"]
-text_dict = text_encoder(text)
-
-# Access encoded features
-encoded_text = text_dict["encoded_text"]  # (B, L, D)
-text_token_mask = text_dict["text_token_mask"]  # (B, L)
-position_ids = text_dict["position_ids"]  # (B, L)
-```
-
-### Feature Fusion
-
-```python
-from jittor_implementation.models.fusion import FeatureFusion
-
-# Initialize fusion module
-fusion = FeatureFusion(
-    hidden_dim=256,
-    num_heads=8,
-    dropout=0.1
-)
-
-# Fuse visual and text features
-fused_features = fusion(
-    visual_features,  # (B, H, W, D) or (B, N, D)
-    text_features,    # (B, L, D)
-    text_token_mask   # (B, L)
-)
-```
-
-### Query Generation
-
-```python
-from jittor_implementation.models.query import LanguageGuidedQuery
-
-# Initialize query generator
-query_generator = LanguageGuidedQuery(
-    hidden_dim=256,
-    num_queries=900
-)
-
-# Generate queries from text
-queries = query_generator(
-    text_features,  # (B, L, D)
-    text_token_mask  # (B, L)
-)
-```
-
-### Training
-
-```python
-from jittor_implementation.train.config import TrainingConfig
-from jittor_implementation.train.trainer import Trainer
-
-# Create configuration
-config = TrainingConfig()
-config.model_name = "groundingdino_swin-t"
-config.batch_size = 4
-config.epochs = 40
-
-# Create trainer
-trainer = Trainer(
-    model=model,
-    text_encoder=text_encoder,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    criterion=criterion,
-    optimizer=optimizer,
-    scheduler=scheduler,
-    config=config
-)
-
-# Start training
-trainer.train()
-```
-
-### Command-line Training
+使用 `finetune_lvis_v2.py` 进行 LVIS 微调：
 
 ```bash
-# Train model with default configuration
-python -m jittor_implementation.train.trainer \
-  --model_name groundingdino_swin-t \
-  --batch_size 4 \
-  --epochs 40 \
-  --lr 1e-4 \
-  --lr_backbone 1e-5 \
-  --data_path /path/to/dataset \
-  --output_dir ./outputs \
-  --checkpoint_dir ./checkpoints
+# 快速测试 (验证训练流程)
+python scripts/finetune_lvis_v2.py \
+    --test_only \
+    --num_samples 10 \
+    --epochs 2
 
-# Resume training from checkpoint
-python -m jittor_implementation.train.trainer \
-  --model_name groundingdino_swin-t \
-  --resume ./checkpoints/groundingdino_latest.pth \
-  --data_path /path/to/dataset \
-  --output_dir ./outputs \
-  --checkpoint_dir ./checkpoints
+# 小规模微调 (100 样本, 5 epochs)
+python scripts/finetune_lvis_v2.py \
+    --num_samples 100 \
+    --epochs 5 \
+    --batch_size 2 \
+    --gradient_accumulation 16 \
+    --lr 1e-4 \
+    --lr_backbone 1e-5 \
+    --output_dir outputs/finetune_100
+
+# 大规模微调 (1000 样本, 推荐配置)
+python scripts/finetune_lvis_v2.py \
+    --num_samples 1000 \
+    --epochs 24 \
+    --batch_size 4 \
+    --gradient_accumulation 4 \
+    --lr 1e-4 \
+    --lr_backbone 1e-5 \
+    --freeze_text_encoder \
+    --output_dir outputs/finetune_1k
 ```
 
-### VLM Comparison
+**微调参数说明**:
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--checkpoint` | 预训练权重路径 | Jittor 权重 |
+| `--num_samples` | 训练样本数量 | 100 |
+| `--epochs` | 训练轮数 | 24 |
+| `--batch_size` | 批大小 | 4 |
+| `--gradient_accumulation` | 梯度累积步数 | 4 |
+| `--lr` | 学习率 | 1e-4 |
+| `--lr_backbone` | 骨干网络学习率 | 1e-5 |
+| `--freeze_text_encoder` | 冻结 BERT | True |
+| `--freeze_backbone` | 冻结 Swin-T | False |
+| `--clip_grad_norm` | 梯度裁剪 | 0.1 |
 
-```python
-from jittor_implementation.experiments.vlm_comparison import VLMComparator
-
-# Initialize comparator
-comparator = VLMComparator(
-    model=model,
-    text_encoder=text_encoder,
-    config=config,
-    output_dir="./comparison_results"
-)
-
-# Process images with text prompts
-results = comparator.run_comparison(
-    image_list=["image1.jpg", "image2.jpg"],
-    text_prompts=["person", "dog", "cat"],
-    save_visualizations=True
-)
-```
-
-### Command-line VLM Comparison
+### 3. 评估微调后模型
 
 ```bash
-# Compare model outputs on test images
-python -m jittor_implementation.experiments.vlm_comparison \
-  --checkpoint_path ./checkpoints/groundingdino_best.pth \
-  --image_list image1.jpg image2.jpg image3.jpg \
-  --text_prompts "person . dog" "car . bicycle" "cat . bird" \
-  --output_dir ./comparison_results \
-  --save_visualizations
+# 使用微调权重进行评估
+python scripts/eval_lvis_zeroshot_full.py \
+    --finetuned_checkpoint outputs/finetune_1k/checkpoint_best.pkl \
+    --base_checkpoint weights/groundingdino_swint_ogc_jittor.pkl \
+    --num_images 100 \
+    --output_dir outputs/eval_finetuned
 ```
-```bash
-# Start two gpu run on the whole LVIS/val dataset
- cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_lvis_zeroshot_full.py --full --n_gpus 2 --checkpoint_interval 500 --image_dir ../val2017 --image_dir_fallback ../train2017 --output_dir outputs/lvis_full_2gpu --resume 2>&1 | tee lvis_eval_fixed.log
-```
-```bash
-# new startup
-cd GroundingDINO_Jittor && source ../.venv/bin/activate && python scripts/eval_lvis_zeroshot_full.py --num_images 10
-```
-```bash
-# new ablation
-source .venv/bin/activate && cd GroundingDINO_Jittor && python scripts/eval_Gdino_ablation.py --ablation no_text_cross_attn --num_images 10
-```
-```bash
-#finetune eval
-python scripts/eval_lvis_zeroshot_full.py     --finetuned_checkpoint ../outputs/test_finetune_square/checkpoint_best.pkl     --base_checkpoint weights/groundingdino_swint_ogc_jittor.pkl     --num_images 100
 
-cd /root/shared-nvme/GroundingDINO-Light/GroundingDINO_Jittor/
-CUDA_VISIBLE_DEVICES=1 python scripts/eval_lvis_zeroshot_full.py \
-  --finetuned_checkpoint ../outputs/finetune_448/checkpoint_best.pkl \
-  --base_checkpoint weights/groundingdino_swint_ogc_jittor.pkl \
-  --num_images 100 \
-  --output_dir ../outputs/eval_finetune_448
+### 4. 消融实验 (Ablation)
 
+使用 `eval_Gdino_ablation.py` 验证关键组件的作用：
+
+```bash
+# 消融1: 移除文本交叉注意力
+python scripts/eval_Gdino_ablation.py \
+    --ablation no_text_cross_attn \
+    --num_images 100 \
+    --output_dir outputs/ablation_no_cross_attn
+
+# 消融2: 随机文本嵌入
+python scripts/eval_Gdino_ablation.py \
+    --ablation random_text \
+    --num_images 100 \
+    --output_dir outputs/ablation_random_text
+
+# 完整消融实验 (4752 张图像)
+python scripts/eval_Gdino_ablation.py \
+    --ablation no_text_cross_attn \
+    --full \
+    --output_dir outputs/ablation_full
 ```
+
+### 5. OWL-ViT 对比实验
+
+使用 `eval_owlvit_lvis.py` 与 OWL-ViT 进行对比：
+
+```bash
+# 快速对比 (100 张图像)
+python scripts/eval_owlvit_lvis.py \
+    --num_images 100 \
+    --batch_size 25 \
+    --output_dir outputs/owlvit_test
+
+# 完整对比 (4752 张图像)
+python scripts/eval_owlvit_lvis.py \
+    --full \
+    --batch_size 25 \
+    --resume \
+    --output_dir outputs/owlvit_full
+```
+
+### 6. 结果可视化
+
+```bash
+# 可视化检测结果
+python scripts/visualize_lvis_predictions.py \
+    --predictions outputs/zeroshot_full/lvis_predictions.json \
+    --lvis_ann ../LVIS/minival/lvis_v1_minival.json \
+    --image_dir ../LVIS/minival \
+    --output_dir outputs/visualizations \
+    --score_threshold 0.3 \
+    --max_boxes 50
+```
+
+## Evaluation Scripts Overview
+
+| Script | Purpose | Categories | Speed |
+|--------|---------|------------|-------|
+| `eval_lvis_zeroshot_full.py` | Official benchmarking | All 1203 | ~5.5s/img |
+| `quick_test_zeroshot.py` | Debugging & visualization | GT only | ~0.3s/img |
+| `eval_owlvit_lvis.py` | OWL-ViT comparison | All 1203 | ~2.4s/img |
+| `eval_Gdino_ablation.py` | Ablation studies | All 1203 | ~5.5s/img |
+| `finetune_lvis_v2.py` | LVIS fine-tuning | All 1203 | - |
+| `visualize_lvis_predictions.py` | Result visualization | - | - |
+
+## Output Files
+
+评估和训练脚本会生成以下输出文件：
+
+### Zero-Shot 评估输出
+```
+outputs/zeroshot_full/
+├── predictions.jsonl          # 逐行 JSON 预测结果 (支持断点续传)
+├── progress.json              # 断点续传进度
+├── lvis_predictions.json      # 完整预测结果 (LVIS 格式)
+├── lvis_zeroshot_results.json # 评估指标汇总
+└── eval.log                   # 运行日志
+```
+
+### 微调输出
+```
+outputs/finetune_1k/
+├── checkpoint_epoch_XX.pkl    # 各 epoch 检查点
+├── checkpoint_best.pkl        # 最佳模型 (按验证 AP)
+├── training_log.json          # 训练损失曲线
+└── config.json                # 训练配置
+```
+
+## Performance Optimization
+
+| Optimization | Before | After | Speedup |
+|--------------|--------|-------|---------|
+| Vision feature caching | 14.8s/img | 5.5s/img | **63%** |
+| Vectorized post-processing | - | - | included |
+| Category batching (60/batch) | OOM | stable | - |
+
+## Troubleshooting
+
+### 常见问题
+
+**1. BERT 模型加载失败**
+```bash
+# 确保 transformers 已安装
+pip install transformers
+
+# 首次运行需要联网下载，之后可以设置离线模式
+export HF_HUB_OFFLINE=1
+```
+
+**2. CUDA 内存不足 (OOM)**
+```bash
+# 减小 batch_size
+python scripts/eval_lvis_zeroshot_full.py --batch_size 30
+
+# 或使用 CPU 模式
+CUDA_VISIBLE_DEVICES="" python scripts/eval_lvis_zeroshot_full.py
+```
+
+**3. JIT 编译冲突 (多 GPU)**
+```bash
+# 限制 JIT 并行编译数
+export JT_COMPILE_PARALLEL=1
+```
+
+**4. 权重转换失败**
+```bash
+# 确保同时安装了 PyTorch 和 Jittor
+pip install torch
+pip install jittor
+```
+
+**5. 图像路径不匹配**
+```bash
+# 检查图像目录结构
+ls ../LVIS/minival/*.jpg | head -5
+
+# 如果图像在子目录中，使用软链接
+ln -s /path/to/coco/val2017/*.jpg ../LVIS/minival/
+```
+
+## Citation
+
+```bibtex
+@inproceedings{liu2023grounding,
+  title={Grounding DINO: Marrying DINO with Grounded Pre-Training for Open-Set Object Detection},
+  author={Liu, Shilong and Zeng, Zhaoyang and Ren, Tianhe and Li, Feng and Zhang, Hao and Yang, Jie and Li, Chunyuan and Yang, Jianwei and Su, Hang and Zhu, Jun and Zhang, Lei},
+  booktitle={European Conference on Computer Vision},
+  year={2024}
+}
+```
+
+## Team
+
+- 张毅 (2022010387, 工22) - grounding-dino的Jittor复现及其他脚本撰写
+- 杨弘毅 (2023011638, 英31) - zero-shot及模型对比和消融实验等额外任务
+- 苏博宇 (2023011277, 物理32) - 微调及训练pipeline
+
+## License
+
+This project is for educational purposes as part of the Tsinghua University ANN course final project.
