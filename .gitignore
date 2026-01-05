@@ -92,5 +92,7 @@ GroundingDINO_Jittor/jittor_implementation/__pycache__/
 *.txt
 *.pkl
 
+*.pub
+
 # Obsolete files directory
 dump_obsolete/

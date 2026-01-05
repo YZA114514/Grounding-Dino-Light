@@ -4,7 +4,7 @@ Grounding DINO Ablation Experiments
 
 Supports multiple ablation experiments through command-line arguments:
 
-1. --ablation no_enhancer: Skip Feature Enhancer (BiAttentionBlock)
+1. --ablation no_text_cross_attn: Remove text cross-attention in decoder (novel ablation)
 2. --ablation single_scale --scale_idx N: Use only single scale features (N=0,1,2,3)
 3. --ablation random_text: Replace text embeddings with random noise
 4. --ablation fewer_layers --num_layers N: Use only N decoder layers (default 3)
@@ -14,7 +14,7 @@ Supports multiple ablation experiments through command-line arguments:
    - with_photo: "a photo of a traffic light"
 
 Usage:
-    python scripts/eval_Gdino_ablation.py --ablation no_enhancer --num_images 100
+    python scripts/eval_Gdino_ablation.py --ablation no_text_cross_attn --num_images 100
     python scripts/eval_Gdino_ablation.py --ablation single_scale --scale_idx 0 --num_images 100
     python scripts/eval_Gdino_ablation.py --ablation random_text --num_images 100
     python scripts/eval_Gdino_ablation.py --ablation fewer_layers --num_layers 3 --num_images 100
@@ -191,7 +191,7 @@ def parse_args():
 
     # Ablation experiment arguments
     parser.add_argument('--ablation', type=str, default=None,
-                        choices=['no_enhancer', 'single_scale', 'random_text', 'fewer_layers', 'prompt_style'],
+                        choices=['no_text_cross_attn', 'single_scale', 'random_text', 'fewer_layers', 'prompt_style'],
                         help='Type of ablation experiment to run')
     parser.add_argument('--scale_idx', type=int, default=2,
                         help='Scale index for single_scale ablation (0=high-res, 3=low-res)')
@@ -267,195 +267,322 @@ def load_predictions_from_jsonl(output_dir):
     return predictions
 
 
-class AblationWrapper:
-    """Wrapper class to apply ablation experiments to the model."""
+def apply_ablation_direct(model, ablation_type, ablation_params):
+    """Apply ablation experiments directly to the model object (in-memory only)."""
 
-    def __init__(self, model, ablation_type, ablation_params):
-        self.model = model
-        self.ablation_type = ablation_type
-        self.ablation_params = ablation_params
+    if ablation_type == 'no_text_cross_attn':
+        # Remove text cross-attention in decoder
+        apply_no_text_cross_attn_ablation(model)
 
-        # Apply ablation modifications to the model in-place
-        self._apply_ablation()
+    elif ablation_type == 'single_scale':
+        # Use only single scale features
+        apply_single_scale_ablation(model, ablation_params.get('scale_idx', 2))
 
-    def _apply_ablation(self):
-        """Apply the specified ablation experiment."""
-        if self.ablation_type == 'no_enhancer':
-            # Skip Feature Enhancer by modifying encoder to not use fusion layers
-            self._apply_no_enhancer()
-        elif self.ablation_type == 'single_scale':
-            # Use only single scale features
-            self._apply_single_scale()
-        elif self.ablation_type == 'random_text':
-            # Replace text embeddings with random noise
-            self._apply_random_text()
-        elif self.ablation_type == 'fewer_layers':
-            # Use fewer decoder layers
-            self._apply_fewer_layers()
-        # prompt_style ablation is applied at the data level, not model level
+    elif ablation_type == 'random_text':
+        # Replace text embeddings with random noise
+        apply_random_text_ablation(model)
 
-    def _apply_no_enhancer(self):
-        """Skip Feature Enhancer by bypassing fusion layers in encoder."""
-        original_encoder_execute = self.model.transformer.encoder.execute
+    elif ablation_type == 'fewer_layers':
+        # Use fewer decoder layers
+        apply_fewer_layers_ablation(model, ablation_params.get('num_layers', 3))
 
-        def ablated_encoder_execute(src, pos, spatial_shapes, level_start_index, valid_ratios,
-                                  key_padding_mask, memory_text=None, text_attention_mask=None,
-                                  pos_text=None, text_self_attention_masks=None, position_ids=None):
-            """Modified encoder that skips fusion layers."""
-            output = src
+    # prompt_style ablation is applied at the data level, not model level
 
-            # Generate reference points (same as original)
-            if self.model.transformer.encoder.num_layers > 0:
-                reference_points = self.model.transformer.encoder.get_reference_points(
-                    spatial_shapes, valid_ratios, device=None
+    # Store ablation type for later use in encoder
+    model._ablation_type = ablation_type
+
+
+def apply_no_enhancer_ablation(model):
+    """Skip Feature Enhancer by bypassing fusion layers in encoder."""
+    original_encoder_execute = model.transformer.encoder.execute
+
+    def ablated_encoder_execute(src, pos, spatial_shapes, level_start_index, valid_ratios,
+                              key_padding_mask, memory_text=None, text_attention_mask=None,
+                              pos_text=None, text_self_attention_masks=None, position_ids=None):
+        """Modified encoder that skips fusion layers."""
+        output = src
+
+        # Generate reference points (same as original)
+        if model.transformer.encoder.num_layers > 0:
+            reference_points = model.transformer.encoder.get_reference_points(
+                spatial_shapes, valid_ratios, device=None
+            )
+
+        # Generate text position encoding (same as original)
+        if model.transformer.encoder.text_layers:
+            bs, n_text, text_dim = memory_text.shape
+            if pos_text is None and position_ids is None:
+                pos_text = jt.arange(n_text).float().unsqueeze(0).unsqueeze(-1)
+                pos_text = pos_text.repeat(bs, 1, 1)
+                pos_text = jt.zeros(bs, n_text, model.hidden_dim)
+            if position_ids is not None:
+                pos_text = jt.zeros(bs, n_text, model.hidden_dim)
+
+        # Main processing loop WITHOUT fusion layers (skip BiAttentionBlock)
+        for layer_id, layer in enumerate(model.transformer.encoder.layers):
+            # SKIP: Feature fusion (BiAttentionBlock) - this is the "enhancer" we want to ablate
+
+            # Apply text enhancement layers (keep text processing)
+            if model.transformer.encoder.text_layers:
+                memory_text = model.transformer.encoder.text_layers[layer_id](
+                    src=memory_text.transpose(0, 1),
+                    src_mask=jt.logical_not(text_self_attention_masks) if text_self_attention_masks is not None else None,
+                    src_key_padding_mask=text_attention_mask,
+                    pos=pos_text.transpose(0, 1) if pos_text is not None else None,
+                ).transpose(0, 1)
+
+            # Apply visual encoding (keep deformable attention)
+            output = layer(
+                src=output,
+                pos=pos,
+                reference_points=reference_points,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                key_padding_mask=key_padding_mask,
+            )
+
+        return output, memory_text
+
+    # Replace encoder execute method
+    model.transformer.encoder.execute = ablated_encoder_execute
+
+
+def apply_single_scale_ablation(model, scale_idx):
+    """Use only a single scale of features by zeroing out other scales."""
+    original_encode_image_projection = model.encode_image_projection
+
+    def single_scale_encode_image_projection(samples):
+        """Modified image projection that zeros out all scales except the specified one."""
+        # Call original method
+        projected_features = original_encode_image_projection(samples)
+
+        # Extract features
+        src_flatten = projected_features['src_flatten']
+        mask_flatten = projected_features['mask_flatten']
+        lvl_pos_embed_flatten = projected_features['lvl_pos_embed_flatten']
+        spatial_shapes = projected_features['spatial_shapes']
+        level_start_index = projected_features['level_start_index']
+        valid_ratios = projected_features['valid_ratios']
+
+        # Zero out features from all scales except the specified one
+        total_features = 0
+        for i, (h, w) in enumerate(spatial_shapes):
+            scale_size = int(h * w)
+            start_idx = int(level_start_index[i])
+            end_idx = start_idx + scale_size
+
+            if i != scale_idx:
+                # Zero out this scale's features (Jittor uses direct assignment)
+                src_flatten[:, start_idx:end_idx, :] = 0
+                mask_flatten[:, start_idx:end_idx] = 0
+                lvl_pos_embed_flatten[:, start_idx:end_idx, :] = 0
+
+        return {
+            'src_flatten': src_flatten,
+            'mask_flatten': mask_flatten,
+            'lvl_pos_embed_flatten': lvl_pos_embed_flatten,
+            'spatial_shapes': spatial_shapes,
+            'level_start_index': level_start_index,
+            'valid_ratios': valid_ratios,
+        }
+
+    # Replace method
+    model.encode_image_projection = single_scale_encode_image_projection
+
+
+def apply_random_text_ablation(model):
+    """Replace text embeddings with random noise."""
+    # Store original method for shape reference
+    original_encode_text = model.encode_text
+
+    def random_text_encode_text(captions):
+        """Return random text embeddings instead of real ones."""
+        # Get a sample text_dict to know the shape
+        real_text_dict = original_encode_text(captions)
+
+        # Replace with random noise of same shape
+        bs = len(captions)
+        random_text = jt.randn_like(real_text_dict['encoded_text'])
+
+        # Keep other fields the same
+        return {
+            'encoded_text': random_text,
+            'text_token_mask': real_text_dict['text_token_mask'],
+            'position_ids': real_text_dict['position_ids'],
+            'text_self_attention_masks': real_text_dict['text_self_attention_masks'],
+        }
+
+    # Replace method
+    model.encode_text = random_text_encode_text
+
+
+def apply_no_text_cross_attn_ablation(model):
+    """Remove text cross-attention in decoder layers."""
+    from jittor_implementation.models.transformer.decoder import gen_sineembed_for_position, inverse_sigmoid
+
+    original_decoder_execute = model.transformer.decoder.execute
+
+    def no_text_cross_attn_decoder_execute(tgt, memory, tgt_mask=None, memory_mask=None,
+                                         tgt_key_padding_mask=None, memory_key_padding_mask=None,
+                                         pos=None, refpoints_unsigmoid=None, level_start_index=None,
+                                         spatial_shapes=None, valid_ratios=None, memory_text=None,
+                                         text_attention_mask=None):
+        """Modified decoder that skips text cross-attention in all layers."""
+        output = tgt
+
+        intermediate = []
+        reference_points = jt.sigmoid(refpoints_unsigmoid)
+        ref_points = [reference_points]
+
+        for layer_id, layer in enumerate(model.transformer.decoder.layers):
+            # Prepare reference points input (same as original)
+            if reference_points.shape[-1] == 4:
+                reference_points_input = (
+                    reference_points.unsqueeze(2)
+                    * jt.concat([valid_ratios, valid_ratios], dim=-1).unsqueeze(0)
                 )
+            else:
+                assert reference_points.shape[-1] == 2
+                reference_points_input = reference_points.unsqueeze(2) * valid_ratios.unsqueeze(0)
 
-            # Generate text position encoding (same as original)
-            if self.model.transformer.encoder.text_layers:
-                bs, n_text, text_dim = memory_text.shape
-                if pos_text is None and position_ids is None:
-                    pos_text = jt.arange(n_text).float().unsqueeze(0).unsqueeze(-1)
-                    pos_text = pos_text.repeat(bs, 1, 1)
-                    pos_text = jt.zeros(bs, n_text, self.model.hidden_dim)
-                if position_ids is not None:
-                    pos_text = jt.zeros(bs, n_text, self.model.hidden_dim)
+            # Generate query sine embed (same as original)
+            query_sine_embed = gen_sineembed_for_position(
+                reference_points_input[:, :, 0, :]
+            )
 
-            # Main processing loop WITHOUT fusion layers
-            for layer_id, layer in enumerate(self.model.transformer.encoder.layers):
-                # SKIP: Feature fusion (self.fusion_layers[layer_id])
+            # Conditional query position encoding (same as original)
+            raw_query_pos = model.transformer.decoder.ref_point_head(query_sine_embed)
+            pos_scale = model.transformer.decoder.query_scale(output) if model.transformer.decoder.query_scale is not None else 1
+            query_pos = pos_scale * raw_query_pos
 
-                # Apply text enhancement layers (keep text processing)
-                if self.model.transformer.encoder.text_layers:
-                    memory_text = self.model.transformer.encoder.text_layers[layer_id](
-                        src=memory_text.transpose(0, 1),
-                        src_mask=jt.logical_not(text_self_attention_masks) if text_self_attention_masks is not None else None,
-                        src_key_padding_mask=text_attention_mask,
-                        pos=pos_text.transpose(0, 1) if pos_text is not None else None,
-                    ).transpose(0, 1)
+            # Call layer with text cross-attention DISABLED
+            # We'll modify the layer call to skip text cross-attention
+            output = layer_no_text_cross_attn(
+                layer=layer,
+                tgt=output,
+                tgt_query_pos=query_pos,
+                tgt_query_sine_embed=query_sine_embed,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                tgt_reference_points=reference_points_input,
+                # Skip text inputs
+                memory_text=None,  # Pass None to disable text cross-attention
+                text_attention_mask=None,
+                # Keep vision inputs
+                memory=memory,
+                memory_key_padding_mask=memory_key_padding_mask,
+                memory_level_start_index=level_start_index,
+                memory_spatial_shapes=spatial_shapes,
+                memory_pos=pos,
+                self_attn_mask=tgt_mask,
+                cross_attn_mask=memory_mask,
+            )
 
-                # Apply visual encoding (keep deformable attention)
-                output = layer(
-                    src=output,
-                    pos=pos,
-                    reference_points=reference_points,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    key_padding_mask=key_padding_mask,
-                )
+            # Iterative bbox refinement (same as original)
+            if model.transformer.decoder.bbox_embed is not None:
+                reference_before_sigmoid = inverse_sigmoid(reference_points)
+                delta_unsig = model.transformer.decoder.bbox_embed[layer_id](output)
+                outputs_unsig = delta_unsig + reference_before_sigmoid
+                new_reference_points = jt.sigmoid(outputs_unsig)
 
-            return output, memory_text
+                reference_points = new_reference_points.detach()
+                ref_points.append(new_reference_points)
 
-        # Replace encoder execute method
-        self.model.transformer.encoder.execute = ablated_encoder_execute
+            intermediate.append(model.transformer.decoder.norm(output))
 
-    def _apply_single_scale(self):
-        """Use only a single scale of features."""
-        scale_idx = self.ablation_params.get('scale_idx', 2)
-        original_encode_image_projection = self.model.encode_image_projection
+        # Return format: transpose to [bs, nq, d_model]
+        return [
+            [itm_out.transpose(0, 1) for itm_out in intermediate],
+            [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points],
+        ]
 
-        def single_scale_encode_image_projection(samples):
-            """Modified image projection that keeps only one scale."""
-            # Call original method
-            projected_features = original_encode_image_projection(samples)
+    # Helper function to call layer without text cross-attention
+    def layer_no_text_cross_attn(layer, tgt, tgt_query_pos=None, tgt_query_sine_embed=None,
+                                tgt_key_padding_mask=None, tgt_reference_points=None,
+                                memory_text=None, text_attention_mask=None,  # These are ignored
+                                memory=None, memory_key_padding_mask=None,
+                                memory_level_start_index=None, memory_spatial_shapes=None,
+                                memory_pos=None, self_attn_mask=None, cross_attn_mask=None):
 
-            # Extract only the specified scale
-            src_flatten = projected_features['src_flatten']
-            mask_flatten = projected_features['mask_flatten']
-            lvl_pos_embed_flatten = projected_features['lvl_pos_embed_flatten']
-            spatial_shapes = projected_features['spatial_shapes']
-            level_start_index = projected_features['level_start_index']
-            valid_ratios = projected_features['valid_ratios']
+        # 1. Self-attention (same as original)
+        if layer.self_attn is not None:
+            q = k = layer.with_pos_embed(tgt, tgt_query_pos)
+            tgt2, _ = layer.self_attn(q, k, tgt, attn_mask=self_attn_mask)
+            tgt = tgt + layer.dropout2(tgt2)
+            tgt = layer.norm2(tgt)
 
-            # Filter to only the specified scale
-            if scale_idx < len(spatial_shapes):
-                h, w = spatial_shapes[scale_idx]
-                start_idx = int(level_start_index[scale_idx])
-                end_idx = start_idx + int(h * w)
+        # SKIP: Text cross-attention (this is the ablation!)
 
-                # Keep only this scale's features
-                src_flatten = src_flatten[:, start_idx:end_idx, :]
-                mask_flatten = mask_flatten[:, start_idx:end_idx]
-                lvl_pos_embed_flatten = lvl_pos_embed_flatten[:, start_idx:end_idx, :]
-                spatial_shapes = spatial_shapes[scale_idx:scale_idx+1]
-                level_start_index = jt.zeros((1,), dtype=jt.int64)
-                valid_ratios = valid_ratios[:, scale_idx:scale_idx+1, :]
+        # 3. Deformable cross-attention (with vision features - same as original)
+        tgt2 = layer.cross_attn(
+            query=layer.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
+            reference_points=tgt_reference_points.transpose(0, 1).contiguous(),
+            value=memory.transpose(0, 1),
+            spatial_shapes=memory_spatial_shapes,
+            level_start_index=memory_level_start_index,
+            key_padding_mask=memory_key_padding_mask,
+        ).transpose(0, 1)
 
-            return {
-                'src_flatten': src_flatten,
-                'mask_flatten': mask_flatten,
-                'lvl_pos_embed_flatten': lvl_pos_embed_flatten,
-                'spatial_shapes': spatial_shapes,
-                'level_start_index': level_start_index,
-                'valid_ratios': valid_ratios,
-            }
+        tgt = tgt + layer.dropout1(tgt2)
+        tgt = layer.norm1(tgt)
 
-        # Replace method
-        self.model.encode_image_projection = single_scale_encode_image_projection
+        # 4. FFN (same as original)
+        tgt = layer.forward_ffn(tgt)
 
-    def _apply_random_text(self):
-        """Replace text embeddings with random noise."""
-        def random_text_encode_text(captions):
-            """Return random text embeddings instead of real ones."""
-            # Get a sample text_dict to know the shape
-            real_text_dict = self.original_encode_text(captions)
+        return tgt
 
-            # Replace with random noise of same shape
-            bs = len(captions)
-            random_text = jt.randn_like(real_text_dict['encoded_text'])
+    # Replace decoder execute method
+    model.transformer.decoder.execute = no_text_cross_attn_decoder_execute
 
-            # Keep other fields the same
-            return {
-                'encoded_text': random_text,
-                'text_token_mask': real_text_dict['text_token_mask'],
-                'position_ids': real_text_dict['position_ids'],
-                'text_self_attention_masks': real_text_dict['text_self_attention_masks'],
-            }
 
-        # Replace method
-        self.model.encode_text = random_text_encode_text
+def apply_fewer_layers_ablation(model, num_layers):
+    """Use fewer decoder layers, but return 6 intermediate layers (pad with last layer)."""
+    original_decoder_execute = model.transformer.decoder.execute
 
-    def _apply_fewer_layers(self):
-        """Use fewer decoder layers."""
-        num_layers = self.ablation_params.get('num_layers', 3)
-        original_decoder_execute = self.model.transformer.decoder.execute
+    def fewer_layers_decoder_execute(tgt, memory, memory_key_padding_mask, pos, refpoints_unsigmoid,
+                                   level_start_index, spatial_shapes, valid_ratios, memory_text,
+                                   text_attention_mask):
+        """Modified decoder that uses only specified number of layers but returns 6 intermediates."""
+        # Use only the first num_layers layers
+        layers_to_use = model.transformer.decoder.layers[:num_layers]
 
-        def fewer_layers_decoder_execute(tgt, memory, memory_key_padding_mask, pos, refpoints_unsigmoid,
-                                       level_start_index, spatial_shapes, valid_ratios, memory_text,
-                                       text_attention_mask):
-            """Modified decoder that uses only specified number of layers."""
-            # Use only the first num_layers layers
-            layers_to_use = self.model.transformer.decoder.layers[:num_layers]
+        # Initialize outputs
+        output = tgt
+        reference_points = refpoints_unsigmoid
 
-            # Initialize outputs
-            output = tgt
-            reference_points = refpoints_unsigmoid
+        # Keep track of intermediate outputs for bbox/class heads (need exactly 6)
+        intermediate = []
+        intermediate_reference_points = []
 
-            # Keep track of intermediate outputs for bbox/class heads
-            intermediate = []
-            intermediate_reference_points = []
-
-            for layer_idx, layer in enumerate(layers_to_use):
-                if self.model.transformer.decoder.return_intermediate:
-                    intermediate.append(output)
-                    intermediate_reference_points.append(reference_points)
-
-                output, reference_points = layer(
-                    output, memory, memory_key_padding_mask, pos,
-                    reference_points, level_start_index, spatial_shapes, valid_ratios,
-                    memory_text, text_attention_mask
-                )
-
-            if self.model.transformer.decoder.return_intermediate:
+        # Compute actual layers
+        for layer_idx, layer in enumerate(layers_to_use):
+            if model.transformer.decoder.return_intermediate:
                 intermediate.append(output)
                 intermediate_reference_points.append(reference_points)
 
-            if self.model.transformer.decoder.return_intermediate:
-                return intermediate, intermediate_reference_points
-            else:
-                return output, reference_points
+            output, reference_points = layer(
+                output, memory, memory_key_padding_mask, pos,
+                reference_points, level_start_index, spatial_shapes, valid_ratios,
+                memory_text, text_attention_mask
+            )
 
-        # Replace decoder execute method
-        self.model.transformer.decoder.execute = fewer_layers_decoder_execute
+        # Pad to exactly 6 intermediate layers (required by main model)
+        if model.transformer.decoder.return_intermediate:
+            # Add final computed output
+            intermediate.append(output)
+            intermediate_reference_points.append(reference_points)
+
+            # Pad remaining layers with the last computed output (inactive layers)
+            while len(intermediate) < 6:
+                intermediate.append(output.clone())
+                intermediate_reference_points.append(reference_points.clone())
+
+        if model.transformer.decoder.return_intermediate:
+            return intermediate, intermediate_reference_points
+        else:
+            return output, reference_points
+
+    # Replace decoder execute method
+    model.transformer.decoder.execute = fewer_layers_decoder_execute
 
 
 def build_category_batches_ablation(categories, tokenizer, batch_size=60, max_text_len=256, ablation_type=None, ablation_params=None):
@@ -716,6 +843,26 @@ def evaluate_with_lvis(predictions, lvis_data, image_ids, categories, output_dir
     """Run official LVIS evaluation using LVISEval (handles federated annotations correctly)."""
     from lvis import LVIS, LVISResults, LVISEval
 
+    # Handle zero predictions case (ablation experiments may produce no predictions)
+    if not predictions:
+        print("Warning: No predictions generated, skipping LVIS evaluation")
+        # Return zero metrics
+        gt_cat_ids = set(ann['category_id'] for ann in lvis_data['annotations'] if ann['image_id'] in image_ids)
+        return {
+            'AP': 0.0,
+            'AP50': 0.0,
+            'AP75': 0.0,
+            'APs': 0.0,
+            'APm': 0.0,
+            'APl': 0.0,
+            'APr': 0.0,
+            'APc': 0.0,
+            'APf': 0.0,
+            'n_rare_cats': len([c for c in categories if c['id'] in gt_cat_ids and c.get('frequency') == 'r']),
+            'n_common_cats': len([c for c in categories if c['id'] in gt_cat_ids and c.get('frequency') == 'c']),
+            'n_freq_cats': len([c for c in categories if c['id'] in gt_cat_ids and c.get('frequency') == 'f']),
+        }
+
     # Build ground truth in LVIS format (use original full annotations)
     lvis_gt_dict = lvis_data  # Use the original full LVIS data
 
@@ -919,7 +1066,7 @@ def main():
     print(f"\n[3/6] Loading model from {args.checkpoint}...")
     model = load_model(args.checkpoint)
 
-    # Apply ablation wrapper
+    # Apply ablation directly to model (in-memory only)
     if args.ablation:
         print(f"\n[3.5/6] Applying ablation: {args.ablation}")
         ablation_params = {}
@@ -930,7 +1077,7 @@ def main():
         elif args.ablation == 'prompt_style':
             ablation_params['style'] = args.style
 
-        ablation_wrapper = AblationWrapper(model, args.ablation, ablation_params)
+        apply_ablation_direct(model, args.ablation, ablation_params)
         print("  Ablation applied successfully")
 
     # Check for existing checkpoint
@@ -1035,6 +1182,12 @@ def main():
             model, img_tensor, batch_info, None,  # Text encoded fresh per batch
             (orig_w, orig_h), args.box_threshold
         )
+
+        # DEBUG: Print prediction count for first image
+        if img_idx == 0:
+            print(f"  DEBUG: Image {img_id} produced {len(img_preds)} predictions")
+            if len(img_preds) > 0:
+                print(f"  DEBUG: Sample prediction: {img_preds[0]}")
 
         # Add image_id to predictions
         for pred in img_preds:
