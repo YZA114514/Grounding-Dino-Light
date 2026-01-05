@@ -106,3 +106,9 @@ GroundingDINO_Jittor/scripts/split_val2017_for_finetuning.py
 GroundingDINO_Jittor/scripts/test_owlvit_quick.py
 GroundingDINO_Jittor/DEBUGGING_STATUS.md
 GroundingDINO_Jittor/FINETUNE_GUIDE.md
+Grounding-Dino-Light/GroundingDINO_Jittor/scripts/glm4v_inference.py
+GroundingDINO_Jittor/scripts/visualize_inference.py
+protected_scripts/create_subset_from_available.py
+.gitignore
+protected_scripts/create_100_sample_subset.py
+protected_scripts/inspect_lvis_json.py
